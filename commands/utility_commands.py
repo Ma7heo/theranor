@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord import app_commands
 import random
@@ -9,11 +10,6 @@ from database import load_player
 class UtilityCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-    
-    async def setup(self):
-        self.bot.tree.add_command(self.loot_command)
-        self.bot.tree.add_command(self.aide_command)
-        self.bot.tree.add_command(self.rencontre)
 
     @app_commands.command(name="de", description="Lance un dé avec l'expression spécifiée.")
     async def de(self, interaction: discord.Interaction, expression: str):
@@ -249,7 +245,7 @@ class UtilityCommands(commands.Cog):
     @app_commands.command(name="init", description="Effectue un jet d'initiative.")
     async def init(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
-        player_data = load_player(user_id)
+        player_data = await asyncio.to_thread(load_player, user_id)
 
         if not player_data:
             await interaction.response.send_message("Joueur non trouvé.")
@@ -353,139 +349,206 @@ class UtilityCommands(commands.Cog):
         return choices
     
     def get_command_choices(self):
-        return [
-            "creer", "supprimer", "modifier_joueur", "monter_niveau", "info",
-            "donner_argent", "retirer_argent", "ajouter_argent", "ajouter_objet",
-            "donner_objet", "retirer_objet", "l", "utiliser_magie", "attaquer",
-            "repos_long", "init", "armure", "de", "ajouter_familier", "familier",
-            "init_familier", "armure_familier", "info_familier", "r", "loot",
-            "damage", "heal", "submana", "addmana"
-        ]
+        return list(self.get_commands_info().keys())
+
+    def get_commands_info(self):
+        return {
+            "creer": {
+                "description": "Crée un utilisateur joueur.",
+                "usage": "/creer"
+            },
+            "creer_personnage": {
+                "description": "Lance le parcours de création d'un personnage.",
+                "usage": "/creer_personnage"
+            },
+            "supprimer_personnage": {
+                "description": "Supprime un personnage par son nom.",
+                "usage": "/supprimer_personnage nom_personnage:<nom>"
+            },
+            "supprimer": {
+                "description": "Supprime un utilisateur et tous ses personnages.",
+                "usage": "/supprimer"
+            },
+            "liste_personnages": {
+                "description": "Affiche la liste de vos personnages.",
+                "usage": "/liste_personnages"
+            },
+            "choisir_personnage": {
+                "description": "Définit le personnage actif.",
+                "usage": "/choisir_personnage nom_personnage:<nom>"
+            },
+            "modifier_joueur": {
+                "description": "Modifie un champ d'un joueur.",
+                "usage": "/modifier_joueur champ:<champ> valeur:<valeur> [joueur]"
+            },
+            "monter_niveau": {
+                "description": "Augmente le niveau du personnage actif.",
+                "usage": "/monter_niveau"
+            },
+            "info": {
+                "description": "Affiche la fiche du personnage actif (ou d'un joueur).",
+                "usage": "/info [joueur]"
+            },
+            "donner_argent": {
+                "description": "Transfère de l'argent à un autre joueur.",
+                "usage": "/donner_argent destinataire:<membre> montant:<n> type_piece:<pc|pa|po>"
+            },
+            "retirer_argent": {
+                "description": "Retire de l'argent d'un inventaire.",
+                "usage": "/retirer_argent montant:<n> type_piece:<pc|pa|po> [joueur]"
+            },
+            "ajouter_argent": {
+                "description": "Ajoute de l'argent à un joueur.",
+                "usage": "/ajouter_argent joueur:<membre> montant:<n> type_piece:<pc|pa|po>"
+            },
+            "ajouter_objet": {
+                "description": "Ajoute un objet à l'inventaire d'un joueur.",
+                "usage": "/ajouter_objet destinataire:<membre> categorie:<...> nom:<...> [description] [bonus_type] [bonus_value] [degats]"
+            },
+            "donner_objet": {
+                "description": "Donne un objet d'un joueur à un autre.",
+                "usage": "/donner_objet destinataire:<membre> categorie:<...> nom:<...>"
+            },
+            "retirer_objet": {
+                "description": "Retire un objet de l'inventaire.",
+                "usage": "/retirer_objet nom:<...> [categorie] [joueur]"
+            },
+            "modifier_objet": {
+                "description": "Modifie la description d'un objet.",
+                "usage": "/modifier_objet nom_objet:<...> nouvelle_description:<...>"
+            },
+            "ajouter_familier": {
+                "description": "Ajoute un familier à un joueur.",
+                "usage": "/ajouter_familier joueur:<membre> nom:<...> niveau:<n> for_:<n> agi:<n> cha:<n> int_:<n> pv_max:<n> mana_max:<n> compétences:<...>"
+            },
+            "familier": {
+                "description": "Effectue un jet via une action de familier.",
+                "usage": "/familier nom_familier:<...> action:<...>"
+            },
+            "init_familier": {
+                "description": "Jet d'initiative d'un familier.",
+                "usage": "/init_familier nom_familier:<...>"
+            },
+            "armure_familier": {
+                "description": "Jet d'armure d'un familier.",
+                "usage": "/armure_familier nom_familier:<...>"
+            },
+            "info_familier": {
+                "description": "Affiche les informations d'un familier.",
+                "usage": "/info_familier nom_familier:<...>"
+            },
+            "attaquer_familier": {
+                "description": "Attaque avec un familier.",
+                "usage": "/attaquer_familier nom_familier:<...> weapon_name:<...> [effets...]"
+            },
+            "perdre_pv_familier": {
+                "description": "Retire des PV à un familier.",
+                "usage": "/perdre_pv_familier joueur:<membre> nom_familier:<...> degats:<expression>"
+            },
+            "soigner_familier": {
+                "description": "Soigne un familier.",
+                "usage": "/soigner_familier joueur:<membre> nom_familier:<...> soin:<expression>"
+            },
+            "perdre_mana_familier": {
+                "description": "Retire du mana à un familier.",
+                "usage": "/perdre_mana_familier joueur:<membre> nom_familier:<...> cout_mana:<expression>"
+            },
+            "ajouter_mana_familier": {
+                "description": "Ajoute du mana à un familier.",
+                "usage": "/ajouter_mana_familier joueur:<membre> nom_familier:<...> mana_ajoute:<expression>"
+            },
+            "donner_objet_familier": {
+                "description": "Donne un objet à un familier.",
+                "usage": "/donner_objet_familier nom_familier:<...> categorie:<...> nom:<...>"
+            },
+            "rendre_objet_familier": {
+                "description": "Rend un objet du familier au joueur.",
+                "usage": "/rendre_objet_familier nom_familier:<...> categorie:<...> nom:<...>"
+            },
+            "supprimer_familier": {
+                "description": "Supprime un familier d'un joueur.",
+                "usage": "/supprimer_familier joueur:<membre> nom_familier:<...>"
+            },
+            "modifier_familier": {
+                "description": "Modifie un champ d'un familier.",
+                "usage": "/modifier_familier joueur:<membre> familier:<...> champ:<...> valeur:<...>"
+            },
+            "attaquer": {
+                "description": "Effectue une attaque avec une arme ou pugilat.",
+                "usage": "/attaquer weapon_name:<...> [effets...]"
+            },
+            "l": {
+                "description": "Effectue un jet de compétence ou d'attribut.",
+                "usage": "/l skill_name:<...>"
+            },
+            "utiliser_magie": {
+                "description": "Lance une magie avec effets optionnels.",
+                "usage": "/utiliser_magie magie_type:<magie1|magie2> [effets...]"
+            },
+            "damage": {
+                "description": "Inflige des dégâts à un joueur.",
+                "usage": "/damage joueur:<membre> expression:<dés> [armure]"
+            },
+            "heal": {
+                "description": "Soigne un joueur.",
+                "usage": "/heal expression:<dés> [joueur]"
+            },
+            "submana": {
+                "description": "Retire du mana à un joueur.",
+                "usage": "/submana expression:<dés> [joueur]"
+            },
+            "addmana": {
+                "description": "Ajoute du mana à un joueur.",
+                "usage": "/addmana expression:<dés> [joueur]"
+            },
+            "armure": {
+                "description": "Effectue un jet d'armure.",
+                "usage": "/armure"
+            },
+            "repos_long": {
+                "description": "Restaure PV/Mana d'un joueur ou de tous les joueurs.",
+                "usage": "/repos_long [joueur]"
+            },
+            "update_db": {
+                "description": "Exécute la mise à niveau de la base de données.",
+                "usage": "/update_db"
+            },
+            "de": {
+                "description": "Lance une expression de dés.",
+                "usage": "/de expression:<dés>"
+            },
+            "rencontre": {
+                "description": "Génère une rencontre aléatoire.",
+                "usage": "/rencontre [biome]"
+            },
+            "fouille": {
+                "description": "Génère un résultat de fouille aléatoire.",
+                "usage": "/fouille [biome]"
+            },
+            "blessure": {
+                "description": "Génère une blessure aléatoire.",
+                "usage": "/blessure"
+            },
+            "init": {
+                "description": "Effectue un jet d'initiative.",
+                "usage": "/init"
+            },
+            "loot": {
+                "description": "Génère un loot selon le palier choisi.",
+                "usage": "/loot niveau:<T1|T2|T3|T4|T5>"
+            },
+            "aide": {
+                "description": "Affiche l'aide d'une commande.",
+                "usage": "/aide command_name:<commande>"
+            },
+        }
     
 
     
     @app_commands.command(name="aide", description="Affiche l'aide pour une commande spécifique")
     @app_commands.autocomplete(command_name=aide_autocomplete)
     async def aide(self, interaction: discord.Interaction, command_name: str):
-        commands_info = {
-            "creer": {
-                "description": "Crée un nouveau personnage.",
-                "usage": "!creer"
-            },
-            "supprimer": {
-                "description": "Supprime un personnage.",
-                "usage": "!supprimer [joueur_id]"
-            },
-            "modifier_joueur": {
-                "description": "Modifie un champ spécifique d'un joueur.",
-                "usage": "!modifier_joueur <joueur> <champ> <valeur>"
-            },
-            "monter_niveau": {
-                "description": "Augmente le niveau d'un joueur et distribue des points d'attributs et de compétences.",
-                "usage": "!monter_niveau <joueur>"
-            },
-            "info": {
-                "description": "Affiche les informations du joueur.",
-                "usage": "!info [joueur]"
-            },
-            "donner_argent": {
-                "description": "Donne une certaine quantité d'argent à un autre joueur.",
-                "usage": "!donner_argent <destinataire> <montant> <type_piece>"
-            },
-            "retirer_argent": {
-                "description": "Retire une certaine quantité d'argent d'un joueur.",
-                "usage": "!retirer_argent <montant> <type_piece> <joueur>(optional)"
-            },
-            "ajouter_argent": {
-                "description": "Ajoute une certaine quantité d'argent à un joueur.",
-                "usage": "!ajouter_argent <joueur> <montant> <type_piece>"
-            },
-            "ajouter_objet": {
-                "description": "Ajoute un objet à l'inventaire d'un joueur.",
-                "usage": "!ajouter_objet <destinataire> <categorie> <nom> <description> [<bonus_type> <bonus_value>] [<degats>]"
-            },
-            "donner_objet": {
-                "description": "Donne un objet d'un joueur à un autre.",
-                "usage": "!donner_objet <destinataire> <categorie> <nom>"
-            },
-            "retirer_objet": {
-                "description": "Retire un objet de l'inventaire d'un joueur.",
-                "usage": "!retirer_objet <nom> <categorie> <joueur>(optional)"
-            },
-            "l": {
-                "description": "Effectue un jet de compétence ou d'attribut.",
-                "usage": "!lancer_de <skill_name>"
-            },
-            "utiliser_magie": {
-                "description": "Utilise une magie du joueur.",
-                "usage": "!utiliser_magie <magie_type> <niveau>"
-            },
-            "attaquer": {
-                "description": "Effectue une attaque avec une arme ou avec 'pugilat'.",
-                "usage": "!attaquer <weapon_name>"
-            },
-            "repos_long": {
-                "description": "Effectue un repos long et restaure les PV et PM de tous les joueurs.",
-                "usage": "!repos_long"
-            },
-            "init": {
-                "description": "Effectue un jet d'initiative pour le joueur.",
-                "usage": "!init"
-            },
-            "armure": {
-                "description": "Effectue un jet d'armure pour réduire les dégâts.",
-                "usage": "!armure"
-            },
-            "de": {
-                "description": "Lance un jet de dés avec l'expression spécifiée.",
-                "usage": "!de <expression>"
-            },
-            "ajouter_familier": {
-                "description": "Ajoute un familier à un joueur.",
-                "usage": "!ajouter_familier <joueur> <nom> <niveau> <for> <agi> <cha> <int_> <pv_max> <mana_max> <compétences...>"
-            },
-            "familier": {
-                "description": "Utilise une action avec un familier.",
-                "usage": "!familier <nom_familier> <action>"
-            },
-            "init_familier": {
-                "description": "Effectue un jet d'initiative pour le familier.",
-                "usage": "!init_familier <nom_familier>"
-            },
-            "armure_familier": {
-                "description": "Effectue un jet d'armure pour réduire les dégâts du familier.",
-                "usage": "!armure_familier <nom_familier>"
-            },
-            "info_familier": {
-                "description": "Affiche les informations du familier.",
-                "usage": "!info_familier <nom_familier>"
-            },
-            "r": {
-                "description": "Génère une rencontre aléatoire.",
-                "usage": "!r"
-            },
-            "loot": {
-                "description": "Génère un loot en fonction du niveau spécifié.",
-                "usage": "!loot <niveau>"
-            },
-            "damage":{
-                "description":"Inflige des dégâts à un joueur",
-                "usage": "!damage <joueur> <dés de dégâts> <true>(s'il armure)"
-            },
-            "heal": {
-                "description": "Soigne le joueur.",
-                "usage": "!heal <dé de soin> <joueur>(optional)"
-            },
-            "submana": {
-                "description": "Retire du mana au joueur.",
-                "usage": "!submana <dé de mana> <joueur>(optional)"
-            },
-            "addmana": {
-                "description": "Ajoute du mana au joueur.",
-                "usage": "!addmana <dé de mana> <joueur>(optional)"
-            }
-
-        }
+        commands_info = self.get_commands_info()
 
         if command_name:
             command_name = command_name.lower()
@@ -501,8 +564,9 @@ class UtilityCommands(commands.Cog):
 
             if len(help_message) > 2000:
                 chunks = [help_message[i:i + 2000] for i in range(0, len(help_message), 2000)]
-                for chunk in chunks:
-                    await interaction.response.send_message(chunk)
+                await interaction.response.send_message(chunks[0])
+                for chunk in chunks[1:]:
+                    await interaction.followup.send(chunk)
             else:
                 await interaction.response.send_message(help_message)
 

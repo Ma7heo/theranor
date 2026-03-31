@@ -1,10 +1,9 @@
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
 from database import load_all_players, update_player, update_existing_players, add_inventory_column, load_player
 from config import ADMIN_IDS
-from typing import Optional
-import random
 
 
 class AdminCommands(commands.Cog):
@@ -20,7 +19,7 @@ class AdminCommands(commands.Cog):
         if joueur is not None:
             # Repos long pour un joueur spécifique et ses familiers
             player_id = str(joueur.id)
-            player_data = load_player(player_id)
+            player_data = await asyncio.to_thread(load_player, player_id)
 
             if player_data:
                 # Réinitialiser PV et mana du joueur
@@ -34,13 +33,13 @@ class AdminCommands(commands.Cog):
                     familier['attributes']['mana_actu'] = familier['attributes']['mana_max']
 
                 # Sauvegarder les modifications
-                update_player(player_id, player_data)
+                await asyncio.to_thread(update_player, player_id, player_data)
                 await interaction.response.send_message(f"Repos long effectué pour {joueur.mention} et ses familiers.", ephemeral=True)
             else:
                 await interaction.response.send_message(f"Le joueur {joueur.mention} n'a pas été trouvé.", ephemeral=True)
         else:
             # Repos long pour tous les joueurs et leurs familiers
-            players = load_all_players()
+            players = await asyncio.to_thread(load_all_players)
             for player_id, player_data in players.items():
                 # Réinitialiser PV et mana du joueur
                 player_data['pv_actu'] = player_data['pv_max']
@@ -52,7 +51,7 @@ class AdminCommands(commands.Cog):
                     familier['attributes']['mana_actu'] = familier['attributes']['mana_max']
 
                 # Sauvegarder les modifications
-                update_player(player_id, player_data)
+                await asyncio.to_thread(update_player, player_id, player_data)
 
             await interaction.response.send_message("Repos long effectué. Tous les joueurs et leurs familiers ont récupéré leurs PV et leur mana.", ephemeral=True)
 
@@ -62,14 +61,9 @@ class AdminCommands(commands.Cog):
             await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser cette commande.", ephemeral=True)
             return
 
-        update_existing_players()
-        add_inventory_column()
+        await asyncio.to_thread(update_existing_players)
+        await asyncio.to_thread(add_inventory_column)
         await interaction.response.send_message("Base de données mise à jour.", ephemeral=True)
-
-
-    async def setup(self):
-        self.bot.tree.add_command(self.repos_long)
-        self.bot.tree.add_command(self.update_db)
 
 async def setup(bot):
     await bot.add_cog(AdminCommands(bot))

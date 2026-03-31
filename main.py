@@ -1,7 +1,12 @@
 import discord
 from discord.ext import commands
 import asyncio
-from config import TOKEN, PREFIX, INTENTS, GUILD_ID
+import logging
+from config import TOKEN, PREFIX, INTENTS, GUILD_ID, ADMIN_IDS
+from database import DatabaseError, bootstrap_database
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 bot = commands.Bot(command_prefix=PREFIX, intents=INTENTS)
 
@@ -16,8 +21,14 @@ async def load_extensions():
 
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
-    print('------')
+    logger.info(
+        "bot.ready",
+        extra={
+            "bot_user": bot.user.name if bot.user else None,
+            "bot_user_id": bot.user.id if bot.user else None,
+            "guild_id": GUILD_ID,
+        },
+    )
     
     # Synchroniser globalement
     await bot.tree.sync()
@@ -28,12 +39,20 @@ async def on_ready():
 
 @bot.command()
 async def sync(ctx: commands.Context):
+    if str(ctx.author.id) not in ADMIN_IDS:
+        await ctx.send(content="Vous n'êtes pas autorisé à utiliser cette commande.")
+        return
     guild = discord.Object(id=GUILD_ID)  # Utilisez l'ID de votre guilde
     bot.tree.copy_global_to(guild=guild)
     await bot.tree.sync(guild=guild)
     await ctx.send(content="Les commandes ont été synchronisées avec succès.")
 
 async def main():
+    try:
+        bootstrap_database()
+    except DatabaseError:
+        logger.critical("Échec du bootstrap de la base de données. Arrêt du bot.")
+        raise
     await load_extensions()
     await bot.start(TOKEN)
 
