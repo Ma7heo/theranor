@@ -33,9 +33,14 @@ def parse_dice_expression(expression):
                 parts = component.split('d')
                 num_dice = int(parts[0]) if parts[0] != '' else 1
                 dice_size = int(parts[1])
-            
+
+            if num_dice == 0:
+                details.append("0")
+                continue
+
             result = roll_dice(abs(num_dice), dice_size)
-            total_result += result * (num_dice//abs(num_dice))
+            sign = 1 if num_dice > 0 else -1
+            total_result += result * sign
             details.append(f"{result}")
         else:
             adjustment = int(component)

@@ -1,7 +1,8 @@
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
-from database import load_player, update_player
+from database import DatabaseError, load_player, update_player, update_two_players_atomic
 from config import ADMIN_IDS
 
 class InventoryCommands(commands.Cog):
@@ -44,7 +45,7 @@ class InventoryCommands(commands.Cog):
 
     async def item_name_autocomplete(self, interaction: discord.Interaction, current: str):
         user_id = str(interaction.user.id)
-        player_data = load_player(user_id)
+        player_data = await asyncio.to_thread(load_player, user_id)
         if not player_data:
             return []
         items = []
@@ -56,9 +57,13 @@ class InventoryCommands(commands.Cog):
     @app_commands.autocomplete(type_piece=coin_type_autocomplete)
     async def donner_argent(self, interaction: discord.Interaction, destinataire: discord.Member, montant: int, type_piece: str):
         user_id = str(interaction.user.id)
-        donor = load_player(user_id)
+        if montant <= 0:
+            await interaction.response.send_message("Le montant doit être strictement positif.")
+            return
+
+        donor = await asyncio.to_thread(load_player, user_id)
         recipient_id = str(destinataire.id)
-        recipient = load_player(recipient_id)
+        recipient = await asyncio.to_thread(load_player, recipient_id)
 
         if not donor or not recipient:
             await interaction.response.send_message("L'un des joueurs n'existe pas.")
@@ -77,15 +82,21 @@ class InventoryCommands(commands.Cog):
             return
 
         self.ajouter_argents(recipient["inventory"], pc, pa, po)
-
-        update_player(user_id, donor)
-        update_player(recipient_id, recipient)
+        try:
+            await asyncio.to_thread(update_two_players_atomic, user_id, donor, recipient_id, recipient)
+        except DatabaseError:
+            await interaction.response.send_message("Erreur lors du transfert d'argent.")
+            return
 
         await interaction.response.send_message(f"{interaction.user.mention} a donné {montant} {type_piece} à {destinataire.mention}.")
 
     @app_commands.command(name="retirer_argent", description="Retire de l'argent d'un joueur.")
     @app_commands.autocomplete(type_piece=coin_type_autocomplete)
     async def retirer_argent(self, interaction: discord.Interaction, montant: int = 0, type_piece: str = "pc", joueur: discord.Member = None):
+        if montant <= 0:
+            await interaction.response.send_message("Le montant doit être strictement positif.")
+            return
+
         if joueur is None:
             joueur = interaction.user
         else:
@@ -94,7 +105,7 @@ class InventoryCommands(commands.Cog):
                 return
 
         player_id = str(joueur.id)
-        player_data = load_player(player_id)
+        player_data = await asyncio.to_thread(load_player, player_id)
 
         if not player_data:
             await interaction.response.send_message("Joueur non trouvé.")
@@ -112,18 +123,22 @@ class InventoryCommands(commands.Cog):
             await interaction.response.send_message("Fonds insuffisants.")
             return
 
-        update_player(player_id, player_data)
+        await asyncio.to_thread(update_player, player_id, player_data)
 
         await interaction.response.send_message(f"Retiré {montant} {type_piece} de l'inventaire de {player_data['name']}.")
 
     @app_commands.command(name="ajouter_argent", description="Ajoute de l'argent à un joueur.")
     @app_commands.autocomplete(type_piece=coin_type_autocomplete)
     async def ajouter_argent(self, interaction: discord.Interaction, joueur: discord.Member, montant: int, type_piece: str):
+        if montant <= 0:
+            await interaction.response.send_message("Le montant doit être strictement positif.")
+            return
+
         if str(interaction.user.id) not in ADMIN_IDS:
             await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser cette commande.")
             return
         player_id = str(joueur.id)
-        player_data = load_player(player_id)
+        player_data = await asyncio.to_thread(load_player, player_id)
 
         if not player_data:
             await interaction.response.send_message("Joueur non trouvé.")
@@ -139,13 +154,14 @@ class InventoryCommands(commands.Cog):
 
         self.ajouter_argents(player_data["inventory"], pc, pa, po)
 
-        update_player(player_id, player_data)
+        await asyncio.to_thread(update_player, player_id, player_data)
 
         await interaction.response.send_message(f"Ajouté {montant} {type_piece} à l'inventaire de {player_data['name']}.")
 
     async def skill_autocomplete(self, interaction: discord.Interaction, current: str):
         user_id = str(interaction.user.id)
-        choices = [app_commands.Choice(name=choice, value=choice) for choice in get_skill_choices(user_id) if current.lower() in choice.lower()]
+        skill_choices = await asyncio.to_thread(get_skill_choices, user_id)
+        choices = [app_commands.Choice(name=choice, value=choice) for choice in skill_choices if current.lower() in choice.lower()]
         return choices
     
     @app_commands.command(name="ajouter_objet", description="Ajoute un objet à l'inventaire d'un joueur.")
@@ -156,7 +172,7 @@ class InventoryCommands(commands.Cog):
             return
 
         recipient_id = str(destinataire.id)
-        recipient = load_player(recipient_id)
+        recipient = await asyncio.to_thread(load_player, recipient_id)
 
         if not recipient:
             await interaction.response.send_message("Le destinataire n'existe pas.")
@@ -175,7 +191,7 @@ class InventoryCommands(commands.Cog):
         }
 
         recipient["inventory"][categorie].append(objet)
-        update_player(recipient_id, recipient)
+        await asyncio.to_thread(update_player, recipient_id, recipient)
 
         await interaction.response.send_message(f"Vous avez ajouté {nom} à l'inventaire de {destinataire.mention}.")
 
@@ -185,8 +201,8 @@ class InventoryCommands(commands.Cog):
         user_id = str(interaction.user.id)
         recipient_id = str(destinataire.id)
 
-        player = load_player(user_id)
-        recipient = load_player(recipient_id)
+        player = await asyncio.to_thread(load_player, user_id)
+        recipient = await asyncio.to_thread(load_player, recipient_id)
 
         if not player or not recipient:
             await interaction.response.send_message("L'un des joueurs n'existe pas.")
@@ -201,8 +217,11 @@ class InventoryCommands(commands.Cog):
             if objet["nom"] == nom:
                 player["inventory"][categorie].remove(objet)
                 recipient["inventory"][categorie].append(objet)
-                update_player(user_id, player)
-                update_player(recipient_id, recipient)
+                try:
+                    await asyncio.to_thread(update_two_players_atomic, user_id, player, recipient_id, recipient)
+                except DatabaseError:
+                    await interaction.response.send_message("Erreur lors du transfert d'objet.")
+                    return
                 objet_trouve = True
                 break
 
@@ -223,7 +242,7 @@ class InventoryCommands(commands.Cog):
                 return
 
         player_id = str(joueur.id)
-        player_data = load_player(player_id)
+        player_data = await asyncio.to_thread(load_player, player_id)
 
         if not player_data:
             await interaction.response.send_message("Joueur non trouvé.")
@@ -237,7 +256,7 @@ class InventoryCommands(commands.Cog):
         for objet in player_data["inventory"][categorie]:
             if objet["nom"] == nom:
                 player_data["inventory"][categorie].remove(objet)
-                update_player(player_id, player_data)
+                await asyncio.to_thread(update_player, player_id, player_data)
                 objet_trouve = True
                 break
 
@@ -252,7 +271,7 @@ class InventoryCommands(commands.Cog):
     @app_commands.autocomplete(nom_objet=item_name_autocomplete)
     async def modifier_objet(self, interaction: discord.Interaction, nom_objet: str, nouvelle_description: str):
         user_id = str(interaction.user.id)
-        player_data = load_player(user_id)
+        player_data = await asyncio.to_thread(load_player, user_id)
 
         if not player_data:
             await interaction.response.send_message("Joueur non trouvé.")
@@ -262,7 +281,7 @@ class InventoryCommands(commands.Cog):
             for item in player_data['inventory'].get(category, []):
                 if item['nom'] == nom_objet:
                     item['description'] = nouvelle_description
-                    update_player(user_id, player_data)
+                    await asyncio.to_thread(update_player, user_id, player_data)
                     await interaction.response.send_message(f"La description de {nom_objet} a été mise à jour.")
                     return
 
