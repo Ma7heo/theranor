@@ -17,6 +17,7 @@ from commands.player_logic import (
     new_character_template,
 )
 from commands.familier_logic import build_familier_view_model, find_familier
+from commands.embed_utils import coerce_content_to_embed, error_embed, info_embed, success_embed, warning_embed
 from commands.player_views import (
     AttributeDistributionModal,
     CharacterIdentityModal,
@@ -155,6 +156,7 @@ class PlayerCommands(commands.Cog):
         return None
 
     async def _send_interaction_message(self, interaction: Interaction, content=None, view=None, embed=None, ephemeral=True):
+        content, embed = coerce_content_to_embed(content, embed, title="Personnage")
         if interaction.response.is_done():
             await interaction.followup.send(content=content, view=view, embed=embed, ephemeral=ephemeral)
             return
@@ -808,11 +810,15 @@ class PlayerCommands(commands.Cog):
             try:
                 await asyncio.to_thread(add_user, user_id)
             except DatabaseError:
-                await interaction.response.send_message("Erreur lors de la création de l'utilisateur.")
+                await interaction.response.send_message(embed=error_embed("Erreur lors de la création de l'utilisateur.", title="Personnage"))
                 return
-            await interaction.response.send_message(f"Utilisateur {interaction.user.mention} créé avec succès.")
+            await interaction.response.send_message(
+                embed=success_embed(f"Utilisateur {interaction.user.mention} créé avec succès.", title="Personnage")
+            )
             return
-        await interaction.response.send_message(f"Utilisateur {interaction.user.mention} existe déjà.")
+        await interaction.response.send_message(
+            embed=warning_embed(f"Utilisateur {interaction.user.mention} existe déjà.", title="Personnage")
+        )
 
     @app_commands.command(name="creer_personnage", description="Crée un nouveau personnage.")
     async def creer_personnage(self, interaction: Interaction):
@@ -847,30 +853,44 @@ class PlayerCommands(commands.Cog):
     async def supprimer_personnage(self, interaction: Interaction, nom_personnage: str):
         user_id = str(interaction.user.id)
         if await asyncio.to_thread(remove_character, user_id, nom_personnage):
-            await interaction.response.send_message(f"Le personnage {nom_personnage} a été supprimé.")
+            await interaction.response.send_message(
+                embed=success_embed(f"Le personnage {nom_personnage} a été supprimé.", title="Personnage")
+            )
         else:
-            await interaction.response.send_message(f"Le personnage {nom_personnage} n'existe pas.")
+            await interaction.response.send_message(
+                embed=error_embed(f"Le personnage {nom_personnage} n'existe pas.", title="Personnage")
+            )
 
     @app_commands.command(name="supprimer", description="Supprime un utilisateur et tous ses personnages.")
     async def supprimer(self, interaction: Interaction):
         user_id = str(interaction.user.id)
         user_data = await asyncio.to_thread(load_user, user_id)
         if not user_data:
-            await interaction.response.send_message(f"Aucun utilisateur trouvé pour {interaction.user.mention}.")
+            await interaction.response.send_message(
+                embed=error_embed(f"Aucun utilisateur trouvé pour {interaction.user.mention}.", title="Personnage")
+            )
             return
         if await asyncio.to_thread(remove_player, user_id):
-            await interaction.response.send_message(f"Utilisateur {interaction.user.mention} supprimé avec succès.")
+            await interaction.response.send_message(
+                embed=success_embed(f"Utilisateur {interaction.user.mention} supprimé avec succès.", title="Personnage")
+            )
         else:
-            await interaction.response.send_message(f"Erreur lors de la suppression de {interaction.user.mention}.")
+            await interaction.response.send_message(
+                embed=error_embed(f"Erreur lors de la suppression de {interaction.user.mention}.", title="Personnage")
+            )
 
     @app_commands.command(name="liste_personnages", description="Affiche la liste de vos personnages.")
     async def liste_personnages(self, interaction: Interaction):
         user_id = interaction.user.id
         players = await asyncio.to_thread(load_all_characters_by_user, user_id)
         if not players:
-            await interaction.response.send_message("Vous n'avez aucun personnage.")
+            await interaction.response.send_message(
+                embed=warning_embed("Vous n'avez aucun personnage.", title="Personnage")
+            )
             return
-        await interaction.response.send_message(build_character_list_message(players))
+        await interaction.response.send_message(
+            embed=info_embed(build_character_list_message(players), title="Liste des personnages")
+        )
 
     @app_commands.command(name="choisir_personnage", description="Choisit un personnage actif.")
     @app_commands.describe(nom_personnage="Le nom du personnage à choisir")
@@ -879,10 +899,12 @@ class PlayerCommands(commands.Cog):
         user_id = str(interaction.user.id)
         player = await asyncio.to_thread(load_character_by_name, user_id, nom_personnage)
         if not player:
-            await interaction.response.send_message("Personnage non trouvé.")
+            await interaction.response.send_message(embed=error_embed("Personnage non trouvé.", title="Personnage"))
             return
         await asyncio.to_thread(change_active_character, user_id, player["id"])
-        await interaction.response.send_message(f"Le personnage {nom_personnage} est maintenant actif.")
+        await interaction.response.send_message(
+            embed=success_embed(f"Le personnage {nom_personnage} est maintenant actif.", title="Personnage")
+        )
 
     async def modifier_joueur_autocomplete(self, interaction: Interaction, current: str):
         return [
@@ -905,7 +927,7 @@ class PlayerCommands(commands.Cog):
         user_id = str(joueur.id) if joueur else str(interaction.user.id)
         player_data, data_root, _, error = await self._resolve_player_and_familier(user_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await interaction.response.send_message(embed=error_embed(error, title="Personnage"))
             return
 
         if familier and champ in {"pv_actu", "pv_max", "mana_actu", "mana_max"}:
@@ -919,17 +941,19 @@ class PlayerCommands(commands.Cog):
             current_value = data[keys[-1]]
             data[keys[-1]] = self._coerce_field_value(current_value, valeur)
         except KeyError:
-            await interaction.response.send_message("Champ non valide.")
+            await interaction.response.send_message(embed=error_embed("Champ non valide.", title="Personnage"))
             return
         except ValueError:
-            await interaction.response.send_message("Valeur non valide pour ce champ.")
+            await interaction.response.send_message(embed=error_embed("Valeur non valide pour ce champ.", title="Personnage"))
             return
         except TypeError:
-            await interaction.response.send_message("Type de donnée invalide pour ce champ.")
+            await interaction.response.send_message(embed=error_embed("Type de donnée invalide pour ce champ.", title="Personnage"))
             return
 
         await asyncio.to_thread(update_player, user_id, player_data)
-        await interaction.response.send_message(f"Le champ {champ} a été mis à jour avec succès à {valeur}.")
+        await interaction.response.send_message(
+            embed=success_embed(f"Le champ {champ} a été mis à jour avec succès à {valeur}.", title="Personnage")
+        )
 
     @app_commands.command(name="monter_niveau", description="Augmente le niveau d'un personnage actif.")
     @app_commands.describe(familier="Familier à faire monter de niveau (optionnel)")
@@ -937,20 +961,26 @@ class PlayerCommands(commands.Cog):
     async def monter_niveau(self, interaction: Interaction, familier: str = None):
         user_id = str(interaction.user.id)
         if not await self._load_user_or_none(user_id):
-            await interaction.response.send_message("Utilisateur non trouvé.")
+            await interaction.response.send_message(embed=error_embed("Utilisateur non trouvé.", title="Niveau"))
             return
 
         if user_id in self.level_up_sessions:
             session = self.level_up_sessions[user_id]
             if familier and session.get("scope") == "familier" and session.get("familier_name") != familier:
                 await interaction.response.send_message(
-                    "Une autre montée de niveau de familier est déjà en cours. Terminez-la d'abord.",
+                    embed=warning_embed(
+                        "Une autre montée de niveau de familier est déjà en cours. Terminez-la d'abord.",
+                        title="Niveau",
+                    ),
                     ephemeral=True,
                 )
                 return
             if familier and session.get("scope") == "joueur":
                 await interaction.response.send_message(
-                    "Une montée de niveau du personnage est déjà en cours. Terminez-la d'abord.",
+                    embed=warning_embed(
+                        "Une montée de niveau du personnage est déjà en cours. Terminez-la d'abord.",
+                        title="Niveau",
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -963,9 +993,9 @@ class PlayerCommands(commands.Cog):
         player_data, familier_data, _, error = await self._resolve_player_and_familier(user_id, familier)
         if error:
             if error == "Joueur non trouvé.":
-                await interaction.response.send_message("Personnage non trouvé.")
+                await interaction.response.send_message(embed=error_embed("Personnage non trouvé.", title="Niveau"))
             else:
-                await interaction.response.send_message(error)
+                await interaction.response.send_message(embed=error_embed(error, title="Niveau"))
             return
 
         if familier_data is not player_data:
@@ -987,15 +1017,15 @@ class PlayerCommands(commands.Cog):
     async def info(self, interaction: Interaction, joueur: discord.Member = None, familier: str = None):
         user_id = str(joueur.id) if joueur else str(interaction.user.id)
         if not await self._load_user_or_none(user_id):
-            await interaction.response.send_message("Utilisateur non trouvé.")
+            await interaction.response.send_message(embed=error_embed("Utilisateur non trouvé.", title="Personnage"))
             return
 
         player_data, entity_data, is_familier, error = await self._resolve_player_and_familier(user_id, familier)
         if error:
             if error == "Joueur non trouvé.":
-                await interaction.response.send_message("Personnage actif non trouvé.")
+                await interaction.response.send_message(embed=error_embed("Personnage actif non trouvé.", title="Personnage"))
             else:
-                await interaction.response.send_message(error)
+                await interaction.response.send_message(embed=error_embed(error, title="Personnage"))
             return
 
         try:
@@ -1005,7 +1035,9 @@ class PlayerCommands(commands.Cog):
             view = InfoNavigationView(user_id, displayed_data)
             await interaction.response.send_message(embed=embed, view=view)
         except (KeyError, TypeError):
-            await interaction.response.send_message("Les données du personnage sont invalides.")
+            await interaction.response.send_message(
+                embed=error_embed("Les données du personnage sont invalides.", title="Personnage")
+            )
 
 
 async def setup(bot):

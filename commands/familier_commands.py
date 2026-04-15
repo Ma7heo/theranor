@@ -5,6 +5,7 @@ import discord
 from discord import Interaction, app_commands
 from discord.ext import commands
 
+from commands.embed_utils import coerce_content_to_embed, error_embed, success_embed, warning_embed
 from commands.familier_logic import default_familier_skills
 from commands.player_views import CreationOwnerView, OpenModalView, SkillCategoryView, SkillDistributionView
 from commands.skill_ui import build_skill_table_text, count_allocated_skill_points
@@ -127,6 +128,7 @@ class FamilierCommands(commands.Cog):
         return str(user_id) in ADMIN_IDS
 
     async def _send_interaction_message(self, interaction: Interaction, content=None, view=None, embed=None, ephemeral=True):
+        content, embed = coerce_content_to_embed(content, embed, title="Familier")
         if interaction.response.is_done():
             await interaction.followup.send(content=content, view=view, embed=embed, ephemeral=ephemeral)
             return
@@ -460,14 +462,15 @@ class FamilierCommands(commands.Cog):
             f"Magies: {', '.join(familier_data['magie'])}\n"
             f"{association_text}"
         )
+        embed = success_embed(content, title="Familier créé")
 
         if interaction.response.is_done():
-            await interaction.followup.send(content=content, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
         if interaction.message:
-            await interaction.response.edit_message(content=content, embed=None, view=None)
+            await interaction.response.edit_message(content=None, embed=embed, view=None)
             return
-        await interaction.response.send_message(content=content, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def character_autocomplete(self, interaction: discord.Interaction, current: str):
         characters = await asyncio.to_thread(load_all_characters_by_user, str(interaction.user.id), False)
@@ -493,7 +496,10 @@ class FamilierCommands(commands.Cog):
     @app_commands.autocomplete(personnage=character_autocomplete)
     async def ajouter_familier(self, interaction: discord.Interaction, personnage: str = None):
         if not self._is_mj(interaction.user.id):
-            await interaction.response.send_message("Seul un MJ peut utiliser cette commande.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=warning_embed("Seul un MJ peut utiliser cette commande.", title="Familier"),
+                ephemeral=True,
+            )
             return
 
         user_id = str(interaction.user.id)
@@ -505,7 +511,10 @@ class FamilierCommands(commands.Cog):
             characters = await asyncio.to_thread(load_all_characters_by_user, user_id, False)
             owner_character = next((c for c in characters if c["name"].lower() == personnage.lower()), None)
             if not owner_character:
-                await interaction.response.send_message("Personnage introuvable pour l'association.", ephemeral=True)
+                await interaction.response.send_message(
+                    embed=error_embed("Personnage introuvable pour l'association.", title="Familier"),
+                    ephemeral=True,
+                )
                 return
 
         if user_id not in self.creation_sessions:
@@ -535,13 +544,19 @@ class FamilierCommands(commands.Cog):
         unowned_familiers = await asyncio.to_thread(load_unassociated_familiers_by_user, user_id)
         familier = next((f for f in unowned_familiers if f["nom"].lower() == nom_familier.lower()), None)
         if not familier:
-            await interaction.response.send_message("Familier non associé introuvable.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=error_embed("Familier non associé introuvable.", title="Association familier"),
+                ephemeral=True,
+            )
             return
 
         characters = await asyncio.to_thread(load_all_characters_by_user, user_id, False)
         owner_character = next((c for c in characters if c["name"].lower() == personnage.lower()), None)
         if not owner_character:
-            await interaction.response.send_message("Personnage introuvable.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=error_embed("Personnage introuvable.", title="Association familier"),
+                ephemeral=True,
+            )
             return
 
         updated = await asyncio.to_thread(
@@ -551,11 +566,17 @@ class FamilierCommands(commands.Cog):
             owner_character["id"],
         )
         if not updated:
-            await interaction.response.send_message("Association impossible.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=error_embed("Association impossible.", title="Association familier"),
+                ephemeral=True,
+            )
             return
 
         await interaction.response.send_message(
-            f"Le familier **{familier['nom']}** est maintenant associé à **{owner_character['name']}**.",
+            embed=success_embed(
+                f"Le familier **{familier['nom']}** est maintenant associé à **{owner_character['name']}**.",
+                title="Association familier",
+            ),
             ephemeral=True,
         )
 

@@ -3,6 +3,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.embed_utils import error_embed, info_embed, success_embed, warning_embed
 from commands.familier_logic import find_familier
 from database import DatabaseError, load_player, update_player, update_two_players_atomic
 from config import ADMIN_IDS
@@ -24,6 +25,18 @@ class InventoryCommands(commands.Cog):
     @staticmethod
     def _entity_name(entity_data, is_familier: bool):
         return entity_data["nom"] if is_familier else entity_data["name"]
+
+    async def _send_error(self, interaction: discord.Interaction, message: str):
+        await interaction.response.send_message(embed=error_embed(message, title="Inventaire"))
+
+    async def _send_warning(self, interaction: discord.Interaction, message: str):
+        await interaction.response.send_message(embed=warning_embed(message, title="Inventaire"))
+
+    async def _send_info(self, interaction: discord.Interaction, message: str):
+        await interaction.response.send_message(embed=info_embed(message, title="Inventaire"))
+
+    async def _send_success(self, interaction: discord.Interaction, message: str):
+        await interaction.response.send_message(embed=success_embed(message, title="Inventaire"))
 
     @staticmethod
     def _is_admin(user_id: str) -> bool:
@@ -183,7 +196,7 @@ class InventoryCommands(commands.Cog):
     ):
         user_id = str(interaction.user.id)
         if montant <= 0:
-            await interaction.response.send_message("Le montant doit être strictement positif.")
+            await self._send_warning(interaction, "Le montant doit être strictement positif.")
             return
 
         recipient_id = str(destinataire.id)
@@ -195,31 +208,31 @@ class InventoryCommands(commands.Cog):
             recipient = await self._load_player_or_none(recipient_id)
 
         if not donor or not recipient:
-            await interaction.response.send_message("L'un des joueurs n'existe pas.")
+            await self._send_error(interaction, "L'un des joueurs n'existe pas.")
             return
 
         donor_entity, donor_is_familier = self._resolve_inventory_entity(donor, familier_source)
         if familier_source and not donor_entity:
-            await interaction.response.send_message("Familier source non trouvé.")
+            await self._send_error(interaction, "Familier source non trouvé.")
             return
         donor_entity, donor_is_familier = self._resolve_entity_or_default(donor_entity, donor_is_familier, donor)
 
         recipient_entity, recipient_is_familier = self._resolve_inventory_entity(recipient, familier_destinataire)
         if familier_destinataire and not recipient_entity:
-            await interaction.response.send_message("Familier destinataire non trouvé.")
+            await self._send_error(interaction, "Familier destinataire non trouvé.")
             return
         recipient_entity, recipient_is_familier = self._resolve_entity_or_default(
             recipient_entity, recipient_is_familier, recipient
         )
 
         if not self._is_valid_coin_type(type_piece):
-            await interaction.response.send_message("Type de pièce invalide. Utilisez 'pc', 'pa' ou 'po'.")
+            await self._send_warning(interaction, "Type de pièce invalide. Utilisez 'pc', 'pa' ou 'po'.")
             return
 
         pc, pa, po = self._amount_to_coin_breakdown(montant, type_piece)
 
         if not self.retirer_argents(donor_entity["inventory"], pc, pa, po):
-            await interaction.response.send_message("Fonds insuffisants.")
+            await self._send_warning(interaction, "Fonds insuffisants.")
             return
 
         self.ajouter_argents(recipient_entity["inventory"], pc, pa, po)
@@ -229,12 +242,13 @@ class InventoryCommands(commands.Cog):
             try:
                 await asyncio.to_thread(update_two_players_atomic, user_id, donor, recipient_id, recipient)
             except DatabaseError:
-                await interaction.response.send_message("Erreur lors du transfert d'argent.")
+                await self._send_error(interaction, "Erreur lors du transfert d'argent.")
                 return
 
-        await interaction.response.send_message(
+        await self._send_success(
+            interaction,
             f"{self._entity_name(donor_entity, donor_is_familier)} a donné {montant} {type_piece} à "
-            f"{self._entity_name(recipient_entity, recipient_is_familier)} ({destinataire.mention})."
+            f"{self._entity_name(recipient_entity, recipient_is_familier)} ({destinataire.mention}).",
         )
 
     @app_commands.command(name="retirer_argent", description="Retire de l'argent d'un joueur.")
@@ -248,43 +262,44 @@ class InventoryCommands(commands.Cog):
         familier: str = None,
     ):
         if montant <= 0:
-            await interaction.response.send_message("Le montant doit être strictement positif.")
+            await self._send_warning(interaction, "Le montant doit être strictement positif.")
             return
 
         if joueur is None:
             joueur = interaction.user
         else:
             if not self._is_admin(str(interaction.user.id)):
-                await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser cette commande.")
+                await self._send_warning(interaction, "Vous n'êtes pas autorisé à utiliser cette commande.")
                 return
 
         player_id = str(joueur.id)
         player_data = await self._load_player_or_none(player_id)
 
         if not player_data:
-            await interaction.response.send_message("Joueur non trouvé.")
+            await self._send_error(interaction, "Joueur non trouvé.")
             return
 
         if not self._is_valid_coin_type(type_piece):
-            await interaction.response.send_message("Type de pièce invalide. Utilisez 'pc', 'pa' ou 'po'.")
+            await self._send_warning(interaction, "Type de pièce invalide. Utilisez 'pc', 'pa' ou 'po'.")
             return
 
         entity_data, is_familier = self._resolve_inventory_entity(player_data, familier)
         if familier and not entity_data:
-            await interaction.response.send_message("Familier non trouvé.")
+            await self._send_error(interaction, "Familier non trouvé.")
             return
         entity_data, is_familier = self._resolve_entity_or_default(entity_data, is_familier, player_data)
 
         pc, pa, po = self._amount_to_coin_breakdown(montant, type_piece)
 
         if not self.retirer_argents(entity_data["inventory"], pc, pa, po):
-            await interaction.response.send_message("Fonds insuffisants.")
+            await self._send_warning(interaction, "Fonds insuffisants.")
             return
 
         await asyncio.to_thread(update_player, player_id, player_data)
 
-        await interaction.response.send_message(
-            f"Retiré {montant} {type_piece} de l'inventaire de {self._entity_name(entity_data, is_familier)}."
+        await self._send_success(
+            interaction,
+            f"Retiré {montant} {type_piece} de l'inventaire de {self._entity_name(entity_data, is_familier)}.",
         )
 
     @app_commands.command(name="ajouter_argent", description="Ajoute de l'argent à un joueur.")
@@ -298,26 +313,26 @@ class InventoryCommands(commands.Cog):
         familier: str = None,
     ):
         if montant <= 0:
-            await interaction.response.send_message("Le montant doit être strictement positif.")
+            await self._send_warning(interaction, "Le montant doit être strictement positif.")
             return
 
         if not self._is_admin(str(interaction.user.id)):
-            await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser cette commande.")
+            await self._send_warning(interaction, "Vous n'êtes pas autorisé à utiliser cette commande.")
             return
         player_id = str(joueur.id)
         player_data = await self._load_player_or_none(player_id)
 
         if not player_data:
-            await interaction.response.send_message("Joueur non trouvé.")
+            await self._send_error(interaction, "Joueur non trouvé.")
             return
 
         if not self._is_valid_coin_type(type_piece):
-            await interaction.response.send_message("Type de pièce invalide. Utilisez 'pc', 'pa' ou 'po'.")
+            await self._send_warning(interaction, "Type de pièce invalide. Utilisez 'pc', 'pa' ou 'po'.")
             return
 
         entity_data, is_familier = self._resolve_inventory_entity(player_data, familier)
         if familier and not entity_data:
-            await interaction.response.send_message("Familier non trouvé.")
+            await self._send_error(interaction, "Familier non trouvé.")
             return
         entity_data, is_familier = self._resolve_entity_or_default(entity_data, is_familier, player_data)
 
@@ -327,8 +342,9 @@ class InventoryCommands(commands.Cog):
 
         await asyncio.to_thread(update_player, player_id, player_data)
 
-        await interaction.response.send_message(
-            f"Ajouté {montant} {type_piece} à l'inventaire de {self._entity_name(entity_data, is_familier)}."
+        await self._send_success(
+            interaction,
+            f"Ajouté {montant} {type_piece} à l'inventaire de {self._entity_name(entity_data, is_familier)}.",
         )
 
     async def skill_autocomplete(self, interaction: discord.Interaction, current: str):
@@ -362,23 +378,23 @@ class InventoryCommands(commands.Cog):
         familier: str = None,
     ):
         if not self._is_admin(str(interaction.user.id)):
-            await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser cette commande.")
+            await self._send_warning(interaction, "Vous n'êtes pas autorisé à utiliser cette commande.")
             return
 
         recipient_id = str(destinataire.id)
         recipient = await self._load_player_or_none(recipient_id)
 
         if not recipient:
-            await interaction.response.send_message("Le destinataire n'existe pas.")
+            await self._send_error(interaction, "Le destinataire n'existe pas.")
             return
 
         if not self._is_valid_inventory_category(categorie):
-            await interaction.response.send_message("Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
+            await self._send_warning(interaction, "Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
             return
 
         recipient_entity, recipient_is_familier = self._resolve_inventory_entity(recipient, familier)
         if familier and not recipient_entity:
-            await interaction.response.send_message("Familier non trouvé.")
+            await self._send_error(interaction, "Familier non trouvé.")
             return
         recipient_entity, recipient_is_familier = self._resolve_entity_or_default(
             recipient_entity, recipient_is_familier, recipient
@@ -395,8 +411,9 @@ class InventoryCommands(commands.Cog):
         recipient_entity["inventory"][categorie].append(objet)
         await asyncio.to_thread(update_player, recipient_id, recipient)
 
-        await interaction.response.send_message(
-            f"Vous avez ajouté {nom} à l'inventaire de {self._entity_name(recipient_entity, recipient_is_familier)} ({destinataire.mention})."
+        await self._send_success(
+            interaction,
+            f"Vous avez ajouté {nom} à l'inventaire de {self._entity_name(recipient_entity, recipient_is_familier)} ({destinataire.mention}).",
         )
 
     @app_commands.command(name="donner_objet", description="Donne un objet à un autre joueur.")
@@ -426,29 +443,29 @@ class InventoryCommands(commands.Cog):
             recipient = await self._load_player_or_none(recipient_id)
 
         if not player or not recipient:
-            await interaction.response.send_message("L'un des joueurs n'existe pas.")
+            await self._send_error(interaction, "L'un des joueurs n'existe pas.")
             return
 
         if not self._is_valid_inventory_category(categorie):
-            await interaction.response.send_message("Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
+            await self._send_warning(interaction, "Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
             return
 
         source_entity, source_is_familier = self._resolve_inventory_entity(player, familier_source)
         if familier_source and not source_entity:
-            await interaction.response.send_message("Familier source non trouvé.")
+            await self._send_error(interaction, "Familier source non trouvé.")
             return
         source_entity, source_is_familier = self._resolve_entity_or_default(source_entity, source_is_familier, player)
 
         target_entity, target_is_familier = self._resolve_inventory_entity(recipient, familier_destinataire)
         if familier_destinataire and not target_entity:
-            await interaction.response.send_message("Familier destinataire non trouvé.")
+            await self._send_error(interaction, "Familier destinataire non trouvé.")
             return
         target_entity, target_is_familier = self._resolve_entity_or_default(target_entity, target_is_familier, recipient)
 
         source_items = source_entity["inventory"][categorie]
         objet = self._find_item_by_name(source_items, nom)
         if not objet:
-            await interaction.response.send_message(f"Objet {nom} non trouvé dans l'inventaire source.")
+            await self._send_warning(interaction, f"Objet {nom} non trouvé dans l'inventaire source.")
             return
 
         source_items.remove(objet)
@@ -459,12 +476,13 @@ class InventoryCommands(commands.Cog):
             try:
                 await asyncio.to_thread(update_two_players_atomic, user_id, player, recipient_id, recipient)
             except DatabaseError:
-                await interaction.response.send_message("Erreur lors du transfert d'objet.")
+                await self._send_error(interaction, "Erreur lors du transfert d'objet.")
                 return
 
-        await interaction.response.send_message(
+        await self._send_success(
+            interaction,
             f"{self._entity_name(source_entity, source_is_familier)} a donné {nom} à "
-            f"{self._entity_name(target_entity, target_is_familier)} ({destinataire.mention})."
+            f"{self._entity_name(target_entity, target_is_familier)} ({destinataire.mention}).",
         )
 
     @app_commands.command(name="retirer_objet", description="Retire un objet de l'inventaire d'un joueur.")
@@ -481,38 +499,40 @@ class InventoryCommands(commands.Cog):
             joueur = interaction.user
         else:
             if not self._is_admin(str(interaction.user.id)):
-                await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser cette commande.")
+                await self._send_warning(interaction, "Vous n'êtes pas autorisé à utiliser cette commande.")
                 return
 
         player_id = str(joueur.id)
         player_data = await self._load_player_or_none(player_id)
 
         if not player_data:
-            await interaction.response.send_message("Joueur non trouvé.")
+            await self._send_error(interaction, "Joueur non trouvé.")
             return
 
         if not self._is_valid_inventory_category(categorie):
-            await interaction.response.send_message("Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
+            await self._send_warning(interaction, "Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
             return
 
         entity_data, is_familier = self._resolve_inventory_entity(player_data, familier)
         if familier and not entity_data:
-            await interaction.response.send_message("Familier non trouvé.")
+            await self._send_error(interaction, "Familier non trouvé.")
             return
         entity_data, is_familier = self._resolve_entity_or_default(entity_data, is_familier, player_data)
 
         category_items = entity_data["inventory"][categorie]
         objet = self._find_item_by_name(category_items, nom)
         if not objet:
-            await interaction.response.send_message(
+            await self._send_warning(
+                interaction,
                 f"Objet {nom} non trouvé dans l'inventaire de {self._entity_name(entity_data, is_familier)}."
             )
             return
         category_items.remove(objet)
         await asyncio.to_thread(update_player, player_id, player_data)
 
-        await interaction.response.send_message(
-            f"Objet {nom} retiré de l'inventaire de {self._entity_name(entity_data, is_familier)}."
+        await self._send_success(
+            interaction,
+            f"Objet {nom} retiré de l'inventaire de {self._entity_name(entity_data, is_familier)}.",
         )
 
     @app_commands.command(name="modifier_objet", description="Modifie la description d'un objet.")
@@ -528,12 +548,12 @@ class InventoryCommands(commands.Cog):
         player_data = await self._load_player_or_none(user_id)
 
         if not player_data:
-            await interaction.response.send_message("Joueur non trouvé.")
+            await self._send_error(interaction, "Joueur non trouvé.")
             return
 
         entity_data, is_familier = self._resolve_inventory_entity(player_data, familier)
         if familier and not entity_data:
-            await interaction.response.send_message("Familier non trouvé.")
+            await self._send_error(interaction, "Familier non trouvé.")
             return
         entity_data, is_familier = self._resolve_entity_or_default(entity_data, is_familier, player_data)
 
@@ -542,12 +562,13 @@ class InventoryCommands(commands.Cog):
             if item:
                 item["description"] = nouvelle_description
                 await asyncio.to_thread(update_player, user_id, player_data)
-                await interaction.response.send_message(
+                await self._send_success(
+                    interaction,
                     f"La description de {nom_objet} a été mise à jour pour {self._entity_name(entity_data, is_familier)}."
                 )
                 return
 
-        await interaction.response.send_message(f"L'objet {nom_objet} n'a pas été trouvé dans votre inventaire.")
+        await self._send_warning(interaction, f"L'objet {nom_objet} n'a pas été trouvé dans votre inventaire.")
 
 
 async def setup(bot):
