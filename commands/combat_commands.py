@@ -52,10 +52,15 @@ class CombatCommands(commands.Cog):
         player_data = await self._load_player_or_none(user_id)
         if not player_data:
             return None
-        familier_name = getattr(interaction.namespace, "familier", None)
-        if not familier_name:
+        entity_name = (
+            getattr(interaction.namespace, "entite", None)
+            or getattr(interaction.namespace, "familier", None)
+        )
+        if not entity_name:
             return player_data
-        familier_data = find_familier(player_data, familier_name)
+        if entity_name.lower() == player_data["name"].lower():
+            return player_data
+        familier_data = find_familier(player_data, entity_name)
         return familier_data or player_data
 
     @staticmethod
@@ -106,10 +111,12 @@ class CombatCommands(commands.Cog):
             return None, None, None, "Joueur non trouvé."
         if not familier_name:
             return player_data, player_data, False, None
+        if familier_name.lower() == player_data["name"].lower():
+            return player_data, player_data, False, None
 
         familier_data = find_familier(player_data, familier_name)
         if not familier_data:
-            return player_data, None, None, f"Familier {familier_name} non trouvé."
+            return player_data, None, None, f"Entité {familier_name} non trouvée."
         return player_data, familier_data, True, None
 
     @staticmethod
@@ -162,26 +169,34 @@ class CombatCommands(commands.Cog):
             if current.lower() in choice.lower()
         ]
 
-    async def familier_autocomplete(self, interaction: discord.Interaction, current: str):
+    async def entity_autocomplete(self, interaction: discord.Interaction, current: str):
         target_user = getattr(interaction.namespace, "joueur", None)
         target_user_id = str(target_user.id) if target_user else str(interaction.user.id)
         player_data = await self._load_player_or_none(target_user_id)
         if not player_data:
             return []
-        return [
+        choices = []
+        player_name = player_data.get("name")
+        if player_name and current.lower() in player_name.lower():
+            choices.append(app_commands.Choice(name=player_name, value=player_name))
+        choices.extend([
             app_commands.Choice(name=familier["nom"], value=familier["nom"])
             for familier in player_data.get("familiers", [])
             if current.lower() in familier["nom"].lower()
-        ]
+        ])
+        return choices
+
+    async def familier_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await self.entity_autocomplete(interaction, current)
 
     @app_commands.command(name="attaquer", description="Effectue une attaque avec une arme ou avec 'pugilat'.")
-    @app_commands.describe(familier="Nom du familier à utiliser (optionnel)")
-    @app_commands.autocomplete(weapon_name=weapon_autocomplete, familier=familier_autocomplete)
+    @app_commands.describe(entite="Nom du familier ou du personnage joueur")
+    @app_commands.autocomplete(entite=entity_autocomplete, weapon_name=weapon_autocomplete)
     async def attaquer(
         self,
         interaction: discord.Interaction,
+        entite: str,
         weapon_name: str,
-        familier: str = None,
         degats: int = 0,
         portee: int = 0,
         saignement: int = 0,
@@ -193,7 +208,7 @@ class CombatCommands(commands.Cog):
         difficulte_crit: int = 0,
     ):
         user_id = str(interaction.user.id)
-        player_data, entity_data, is_familier, error = await self._resolve_entity(user_id, familier)
+        player_data, entity_data, is_familier, error = await self._resolve_entity(user_id, entite)
         if error:
             await self._send_error(interaction, error)
             return
@@ -258,11 +273,11 @@ class CombatCommands(commands.Cog):
         return choices
 
     @app_commands.command(name="l", description="Effectue un jet de compétence ou d'attribut.")
-    @app_commands.describe(familier="Nom du familier à utiliser (optionnel)")
-    @app_commands.autocomplete(skill_name=skill_autocomplete, familier=familier_autocomplete)
-    async def l(self, interaction: discord.Interaction, skill_name: str, familier: str = None):
+    @app_commands.describe(entite="Nom du familier ou du personnage joueur")
+    @app_commands.autocomplete(entite=entity_autocomplete, skill_name=skill_autocomplete)
+    async def l(self, interaction: discord.Interaction, entite: str, skill_name: str):
         user_id = str(interaction.user.id)
-        _, entity_data, _, error = await self._resolve_entity(user_id, familier)
+        _, entity_data, _, error = await self._resolve_entity(user_id, entite)
         if error:
             await self._send_error(interaction, error)
             return
@@ -303,7 +318,7 @@ class CombatCommands(commands.Cog):
 
     @app_commands.command(name="utiliser_magie", description="Utilise une magie spécifique.")
     @app_commands.describe(
-        familier="Nom du familier à utiliser (optionnel)",
+        entite="Nom du familier ou du personnage joueur",
         magie_type="Type de magie à utiliser",
         degats="Nombre de d4 pour les dégâts",
         heal="Nombre de d4 pour les soins",
@@ -317,12 +332,12 @@ class CombatCommands(commands.Cog):
         bouclier_fixe="Nombre de d4 pour le bouclier fixe",
         deplacement="Nombre de d4 pour l'augmentation du déplacement",
     )
-    @app_commands.autocomplete(magie_type=magic_autocomplete, familier=familier_autocomplete)
+    @app_commands.autocomplete(entite=entity_autocomplete, magie_type=magic_autocomplete)
     async def utiliser_magie(
         self,
         interaction: discord.Interaction,
+        entite: str,
         magie_type: str,
-        familier: str = None,
         degats: int = 0,
         heal: int = 0,
         buff: int = 0,
@@ -336,7 +351,7 @@ class CombatCommands(commands.Cog):
         deplacement: int = 0,
     ):
         user_id = str(interaction.user.id)
-        player_data, entity_data, is_familier, error = await self._resolve_entity(user_id, familier)
+        player_data, entity_data, is_familier, error = await self._resolve_entity(user_id, entite)
         if error:
             await self._send_error(interaction, error)
             return
@@ -457,11 +472,11 @@ class CombatCommands(commands.Cog):
         )
 
     @app_commands.command(name="armure", description="Effectue un jet d'armure pour réduire les dégâts")
-    @app_commands.describe(familier="Nom du familier à utiliser (optionnel)")
-    @app_commands.autocomplete(familier=familier_autocomplete)
-    async def armure(self, interaction: discord.Interaction, familier: str = None):
+    @app_commands.describe(entite="Nom du familier ou du personnage joueur")
+    @app_commands.autocomplete(entite=entity_autocomplete)
+    async def armure(self, interaction: discord.Interaction, entite: str):
         user_id = str(interaction.user.id)
-        _, entity_data, is_familier, error = await self._resolve_entity(user_id, familier)
+        _, entity_data, is_familier, error = await self._resolve_entity(user_id, entite)
         if error:
             await self._send_error(interaction, error)
             return

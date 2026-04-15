@@ -75,10 +75,12 @@ class PlayerCommands(commands.Cog):
             return None, None, None, "Joueur non trouvé."
         if not familier:
             return player_data, player_data, False, None
+        if familier.lower() == player_data["name"].lower():
+            return player_data, player_data, False, None
 
         familier_data = find_familier(player_data, familier)
         if not familier_data:
-            return player_data, None, None, "Familier non trouvé."
+            return player_data, None, None, "Entité non trouvée."
         return player_data, familier_data, True, None
 
     def _resolve_familier_for_level_session(self, owner_player_data, session):
@@ -841,11 +843,16 @@ class PlayerCommands(commands.Cog):
         player_data = await self._load_player_or_none(target_user_id)
         if not player_data:
             return []
-        return [
+        choices = []
+        player_name = player_data.get("name")
+        if player_name and current.lower() in player_name.lower():
+            choices.append(app_commands.Choice(name=player_name, value=player_name))
+        choices.extend([
             app_commands.Choice(name=familier_data["nom"], value=familier_data["nom"])
             for familier_data in player_data.get("familiers", [])
             if current.lower() in familier_data["nom"].lower()
-        ]
+        ])
+        return choices
 
     @app_commands.command(name="supprimer_personnage", description="Supprime un personnage.")
     @app_commands.describe(nom_personnage="Le nom du personnage à supprimer")
