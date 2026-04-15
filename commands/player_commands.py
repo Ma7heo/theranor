@@ -16,6 +16,7 @@ from commands.player_logic import (
     finalize_character_stats,
     new_character_template,
 )
+from commands.familier_logic import build_familier_view_model, find_familier
 from commands.player_views import (
     AttributeDistributionModal,
     CharacterIdentityModal,
@@ -27,6 +28,7 @@ from commands.player_views import (
     SkillCategoryView,
     SkillDistributionView,
 )
+from commands.skill_ui import build_skill_table_text, count_allocated_skill_points, display_skill_name
 from database import (
     DatabaseError,
     add_character,
@@ -43,7 +45,6 @@ from database import (
 
 
 class PlayerCommands(commands.Cog):
-    SKILL_TABLE_CATEGORY_ORDER = ("force", "agilite", "charisme", "intelligence")
     ATTRIBUTE_LABELS = {"for": "FOR", "agi": "AGI", "cha": "CHA", "int": "INT"}
     SKILL_CATEGORY_LABELS = {
         "force": "FORCE",
@@ -58,6 +59,37 @@ class PlayerCommands(commands.Cog):
         self.level_up_sessions = {}
         self.creation_steps = CREATION_STEPS
         self.race_bonus = RACE_BONUS
+
+    @staticmethod
+    async def _load_player_or_none(user_id: str):
+        return await asyncio.to_thread(load_player, user_id)
+
+    @staticmethod
+    async def _load_user_or_none(user_id: str):
+        return await asyncio.to_thread(load_user, user_id)
+
+    async def _resolve_player_and_familier(self, user_id: str, familier: str | None):
+        player_data = await self._load_player_or_none(user_id)
+        if not player_data:
+            return None, None, None, "Joueur non trouvé."
+        if not familier:
+            return player_data, player_data, False, None
+
+        familier_data = find_familier(player_data, familier)
+        if not familier_data:
+            return player_data, None, None, "Familier non trouvé."
+        return player_data, familier_data, True, None
+
+    def _resolve_familier_for_level_session(self, owner_player_data, session):
+        familier_id = session.get("familier_id")
+        if familier_id is not None:
+            familier_data = self._find_familier_by_id(owner_player_data, familier_id)
+            if familier_data:
+                return familier_data
+        familier_name = session.get("familier_name")
+        if familier_name:
+            return find_familier(owner_player_data, familier_name)
+        return None
 
     @staticmethod
     def _coerce_field_value(current_value, raw_value):
@@ -76,6 +108,52 @@ class PlayerCommands(commands.Cog):
             return raw_value
         raise TypeError
 
+    @staticmethod
+    def _build_level_up_data_from_familier(familier_data):
+        return {
+            "id": familier_data.get("id"),
+            "name": familier_data["nom"],
+            "age": familier_data.get("age", 0),
+            "race": "Familier",
+            "level": familier_data["niveau"],
+            "attributes": {
+                "for": familier_data["attributes"].get("for", 0),
+                "agi": familier_data["attributes"].get("agi", 0),
+                "cha": familier_data["attributes"].get("cha", 0),
+                "int": familier_data["attributes"].get("int", 0),
+            },
+            "skills": copy.deepcopy(familier_data["skills"]),
+            "magie": copy.deepcopy(familier_data.get("magie", [])),
+            "pv_actu": familier_data["attributes"].get("pv_actu", 0),
+            "pv_max": familier_data["attributes"].get("pv_max", 0),
+            "mana_actu": familier_data["attributes"].get("mana_actu", 0),
+            "mana_max": familier_data["attributes"].get("mana_max", 0),
+            "inventory": copy.deepcopy(familier_data["inventory"]),
+            "familiers": [],
+        }
+
+    @staticmethod
+    def _apply_level_up_data_to_familier(familier_data, level_data):
+        familier_data["niveau"] = level_data["level"]
+        familier_data["attributes"]["for"] = level_data["attributes"]["for"]
+        familier_data["attributes"]["agi"] = level_data["attributes"]["agi"]
+        familier_data["attributes"]["cha"] = level_data["attributes"]["cha"]
+        familier_data["attributes"]["int"] = level_data["attributes"]["int"]
+        familier_data["skills"] = copy.deepcopy(level_data["skills"])
+        familier_data["magie"] = copy.deepcopy(level_data.get("magie", []))
+        familier_data["attributes"]["pv_actu"] = level_data["pv_actu"]
+        familier_data["attributes"]["pv_max"] = level_data["pv_max"]
+        familier_data["attributes"]["mana_actu"] = level_data["mana_actu"]
+        familier_data["attributes"]["mana_max"] = level_data["mana_max"]
+        familier_data["inventory"] = copy.deepcopy(level_data["inventory"])
+
+    @staticmethod
+    def _find_familier_by_id(player_data, familier_id):
+        for familier_data in player_data.get("familiers", []):
+            if familier_data.get("id") == familier_id:
+                return familier_data
+        return None
+
     async def _send_interaction_message(self, interaction: Interaction, content=None, view=None, embed=None, ephemeral=True):
         if interaction.response.is_done():
             await interaction.followup.send(content=content, view=view, embed=embed, ephemeral=ephemeral)
@@ -91,52 +169,6 @@ class PlayerCommands(commands.Cog):
             values[category] = {skill_name: 0 for skill_name in skills_dict}
         session["skill_step"] = {"values": values}
 
-    @staticmethod
-    def _display_skill_name(skill_name: str) -> str:
-        return skill_name.replace("_", " ")
-
-    @staticmethod
-    def _count_allocated_skill_points(values: dict[str, dict[str, int]]) -> int:
-        return sum(skill_value for category_values in values.values() for skill_value in category_values.values())
-
-    def _build_skill_table_text(self, player_data, allocated_values: dict[str, dict[str, int]]) -> str:
-        attributes = player_data["attributes"]
-        category_pairs = [("force", "agilite"), ("charisme", "intelligence")]
-        lines = []
-
-        for pair_index, (left_category, right_category) in enumerate(category_pairs):
-            left_header = f"{self.SKILL_CATEGORY_LABELS[left_category]} ({attributes[left_category[:3]]})"
-            right_header = f"{self.SKILL_CATEGORY_LABELS[right_category]} ({attributes[right_category[:3]]})"
-
-            left_rows = []
-            for skill_name in player_data["skills"][left_category]:
-                current_level = player_data["skills"][left_category][skill_name]
-                allocated_level = allocated_values[left_category][skill_name]
-                left_rows.append(f"{self._display_skill_name(skill_name)}: {current_level + allocated_level}")
-
-            right_rows = []
-            for skill_name in player_data["skills"][right_category]:
-                current_level = player_data["skills"][right_category][skill_name]
-                allocated_level = allocated_values[right_category][skill_name]
-                right_rows.append(f"{self._display_skill_name(skill_name)}: {current_level + allocated_level}")
-
-            left_width = max(len(left_header), *(len(row) for row in left_rows))
-            right_width = max(len(right_header), *(len(row) for row in right_rows))
-
-            lines.append(f"{left_header.ljust(left_width)} | {right_header.ljust(right_width)}")
-            lines.append(f"{'_' * left_width} | {'_' * right_width}")
-
-            row_count = max(len(left_rows), len(right_rows))
-            for row_index in range(row_count):
-                left_cell = left_rows[row_index] if row_index < len(left_rows) else ""
-                right_cell = right_rows[row_index] if row_index < len(right_rows) else ""
-                lines.append(f"{left_cell.ljust(left_width)} | {right_cell.ljust(right_width)}")
-
-            if pair_index == 0:
-                lines.append("")
-
-        return "```text\n" + "\n".join(lines) + "\n```"
-
     def _build_skill_embed(
         self,
         player_data,
@@ -145,7 +177,7 @@ class PlayerCommands(commands.Cog):
         selected_category: str | None = None,
         title_prefix: str = "Répartition des compétences",
     ):
-        allocated_points = self._count_allocated_skill_points(allocated_values)
+        allocated_points = count_allocated_skill_points(allocated_values)
         remaining_points = required_points - allocated_points
 
         title = title_prefix
@@ -153,7 +185,7 @@ class PlayerCommands(commands.Cog):
             title += f" - {self.SKILL_CATEGORY_LABELS.get(selected_category, selected_category.upper())}"
 
         embed = discord.Embed(title=title, color=discord.Color.blurple())
-        embed.description = self._build_skill_table_text(player_data, allocated_values)
+        embed.description = build_skill_table_text(player_data, allocated_values, self.SKILL_CATEGORY_LABELS)
         embed.add_field(name="Points", value=f"{allocated_points}/{required_points} (restants: {remaining_points})", inline=False)
         if selected_category:
             attr_value = player_data["attributes"][selected_category[:3]]
@@ -391,7 +423,7 @@ class PlayerCommands(commands.Cog):
             return
 
         required_points = 9 if session["data"]["race"] == "Humain" else 8
-        allocated_points = self._count_allocated_skill_points(values)
+        allocated_points = count_allocated_skill_points(values)
         if delta > 0 and allocated_points >= required_points:
             await self._send_interaction_message(
                 interaction,
@@ -404,7 +436,7 @@ class PlayerCommands(commands.Cog):
         if updated_value > category_attr:
             await self._send_interaction_message(
                 interaction,
-                f"{self._display_skill_name(skill_name)} ne peut pas dépasser {category_attr} ({self.SKILL_CATEGORY_LABELS.get(category, category.upper())}).",
+                f"{display_skill_name(skill_name)} ne peut pas dépasser {category_attr} ({self.SKILL_CATEGORY_LABELS.get(category, category.upper())}).",
                 ephemeral=True,
             )
             return
@@ -637,7 +669,7 @@ class PlayerCommands(commands.Cog):
             return
 
         if delta > 0:
-            allocated_points = self._count_allocated_skill_points(values)
+            allocated_points = count_allocated_skill_points(values)
             if allocated_points >= session["required_skill_points"]:
                 await self._send_interaction_message(
                     interaction,
@@ -650,7 +682,7 @@ class PlayerCommands(commands.Cog):
         if updated_value > category_attr:
             await self._send_interaction_message(
                 interaction,
-                f"{self._display_skill_name(skill_name)} ne peut pas dépasser {category_attr} ({self.SKILL_CATEGORY_LABELS.get(category, category.upper())}).",
+                f"{display_skill_name(skill_name)} ne peut pas dépasser {category_attr} ({self.SKILL_CATEGORY_LABELS.get(category, category.upper())}).",
                 ephemeral=True,
             )
             return
@@ -718,8 +750,25 @@ class PlayerCommands(commands.Cog):
         player_data["mana_max"] += pm_gain
         player_data["pv_actu"] = player_data["pv_max"]
         player_data["mana_actu"] = player_data["mana_max"]
+
+        entity_label = player_data.get("name", "Le personnage")
         try:
-            await asyncio.to_thread(update_player, user_id, player_data)
+            if session.get("scope") == "familier":
+                owner_player_data = await self._load_player_or_none(user_id)
+                if not owner_player_data:
+                    await self._send_interaction_message(interaction, "Personnage propriétaire introuvable.")
+                    return
+
+                familier_data = self._resolve_familier_for_level_session(owner_player_data, session)
+                if not familier_data:
+                    await self._send_interaction_message(interaction, "Familier introuvable pour la sauvegarde.")
+                    return
+
+                self._apply_level_up_data_to_familier(familier_data, player_data)
+                entity_label = familier_data["nom"]
+                await asyncio.to_thread(update_player, user_id, owner_player_data)
+            else:
+                await asyncio.to_thread(update_player, user_id, player_data)
         except DatabaseError:
             await self._send_interaction_message(interaction, "Erreur lors de la sauvegarde du niveau gagné.")
             return
@@ -727,7 +776,7 @@ class PlayerCommands(commands.Cog):
 
         await interaction.response.edit_message(
             content=(
-                f"Le niveau de {player_data['name']} passe à {player_data['level']}.\n"
+                f"Le niveau de {entity_label} passe à {player_data['level']}.\n"
                 f"PV +{pv_gain}, PM +{pm_gain} | "
                 f"PV max: {player_data['pv_max']} | PM max: {player_data['mana_max']}"
             ),
@@ -780,6 +829,18 @@ class PlayerCommands(commands.Cog):
         names = [character["name"] for character in characters]
         return [app_commands.Choice(name=choice, value=choice) for choice in names if current.lower() in choice.lower()]
 
+    async def familier_autocomplete(self, interaction: Interaction, current: str):
+        target = getattr(interaction.namespace, "joueur", None)
+        target_user_id = str(target.id) if target else str(interaction.user.id)
+        player_data = await self._load_player_or_none(target_user_id)
+        if not player_data:
+            return []
+        return [
+            app_commands.Choice(name=familier_data["nom"], value=familier_data["nom"])
+            for familier_data in player_data.get("familiers", [])
+            if current.lower() in familier_data["nom"].lower()
+        ]
+
     @app_commands.command(name="supprimer_personnage", description="Supprime un personnage.")
     @app_commands.describe(nom_personnage="Le nom du personnage à supprimer")
     @app_commands.autocomplete(nom_personnage=choisir_personnage_autocomplete)
@@ -831,18 +892,28 @@ class PlayerCommands(commands.Cog):
         ]
 
     @app_commands.command(name="modifier_joueur", description="Modifie les détails d'un joueur.")
-    @app_commands.describe(joueur="Le joueur à modifier (optionnel)", champ="Champ à modifier", valeur="Nouvelle valeur")
-    @app_commands.autocomplete(champ=modifier_joueur_autocomplete)
-    async def modifier_joueur(self, interaction: Interaction, champ: str, valeur: str, joueur: discord.Member = None):
-        user_id = joueur.id if joueur else interaction.user.id
-        player_data = await asyncio.to_thread(load_player, user_id)
-        if not player_data:
-            await interaction.response.send_message("Joueur non trouvé.")
+    @app_commands.describe(joueur="Le joueur à modifier (optionnel)", familier="Familier ciblé (optionnel)", champ="Champ à modifier", valeur="Nouvelle valeur")
+    @app_commands.autocomplete(champ=modifier_joueur_autocomplete, familier=familier_autocomplete)
+    async def modifier_joueur(
+        self,
+        interaction: Interaction,
+        champ: str,
+        valeur: str,
+        joueur: discord.Member = None,
+        familier: str = None,
+    ):
+        user_id = str(joueur.id) if joueur else str(interaction.user.id)
+        player_data, data_root, _, error = await self._resolve_player_and_familier(user_id, familier)
+        if error:
+            await interaction.response.send_message(error)
             return
+
+        if familier and champ in {"pv_actu", "pv_max", "mana_actu", "mana_max"}:
+            champ = f"attributes.{champ}"
 
         try:
             keys = champ.split(".")
-            data = player_data
+            data = data_root
             for key in keys[:-1]:
                 data = data[key]
             current_value = data[keys[-1]]
@@ -861,44 +932,77 @@ class PlayerCommands(commands.Cog):
         await interaction.response.send_message(f"Le champ {champ} a été mis à jour avec succès à {valeur}.")
 
     @app_commands.command(name="monter_niveau", description="Augmente le niveau d'un personnage actif.")
-    async def monter_niveau(self, interaction: Interaction):
+    @app_commands.describe(familier="Familier à faire monter de niveau (optionnel)")
+    @app_commands.autocomplete(familier=familier_autocomplete)
+    async def monter_niveau(self, interaction: Interaction, familier: str = None):
         user_id = str(interaction.user.id)
-        if not await asyncio.to_thread(load_user, user_id):
+        if not await self._load_user_or_none(user_id):
             await interaction.response.send_message("Utilisateur non trouvé.")
             return
 
         if user_id in self.level_up_sessions:
             session = self.level_up_sessions[user_id]
+            if familier and session.get("scope") == "familier" and session.get("familier_name") != familier:
+                await interaction.response.send_message(
+                    "Une autre montée de niveau de familier est déjà en cours. Terminez-la d'abord.",
+                    ephemeral=True,
+                )
+                return
+            if familier and session.get("scope") == "joueur":
+                await interaction.response.send_message(
+                    "Une montée de niveau du personnage est déjà en cours. Terminez-la d'abord.",
+                    ephemeral=True,
+                )
+                return
             if session["selected_attribute"] is None:
                 await self.show_level_up_attribute_menu(interaction, user_id)
             else:
                 await self.show_level_up_skill_main_menu(interaction, user_id)
             return
 
-        player_data = await asyncio.to_thread(load_player, user_id)
-        if not player_data:
-            await interaction.response.send_message("Personnage non trouvé.")
+        player_data, familier_data, _, error = await self._resolve_player_and_familier(user_id, familier)
+        if error:
+            if error == "Joueur non trouvé.":
+                await interaction.response.send_message("Personnage non trouvé.")
+            else:
+                await interaction.response.send_message(error)
             return
 
-        self.level_up_sessions[user_id] = self._new_level_up_session(player_data)
+        if familier_data is not player_data:
+            session_data = self._build_level_up_data_from_familier(familier_data)
+            new_session = self._new_level_up_session(session_data)
+            new_session["scope"] = "familier"
+            new_session["familier_id"] = familier_data.get("id")
+            new_session["familier_name"] = familier_data["nom"]
+        else:
+            new_session = self._new_level_up_session(player_data)
+            new_session["scope"] = "joueur"
+
+        self.level_up_sessions[user_id] = new_session
         await self.show_level_up_attribute_menu(interaction, user_id)
 
     @app_commands.command(name="info", description="Affiche les informations du personnage actif.")
-    @app_commands.describe(joueur="Le joueur dont vous voulez voir les informations")
-    async def info(self, interaction: Interaction, joueur: discord.Member = None):
+    @app_commands.describe(joueur="Le joueur dont vous voulez voir les informations", familier="Familier ciblé (optionnel)")
+    @app_commands.autocomplete(familier=familier_autocomplete)
+    async def info(self, interaction: Interaction, joueur: discord.Member = None, familier: str = None):
         user_id = str(joueur.id) if joueur else str(interaction.user.id)
-        if not await asyncio.to_thread(load_user, user_id):
+        if not await self._load_user_or_none(user_id):
             await interaction.response.send_message("Utilisateur non trouvé.")
             return
 
-        player_data = await asyncio.to_thread(load_player, user_id)
-        if not player_data:
-            await interaction.response.send_message("Personnage actif non trouvé.")
+        player_data, entity_data, is_familier, error = await self._resolve_player_and_familier(user_id, familier)
+        if error:
+            if error == "Joueur non trouvé.":
+                await interaction.response.send_message("Personnage actif non trouvé.")
+            else:
+                await interaction.response.send_message(error)
             return
 
         try:
-            embed = build_base_info_embed(player_data)
-            view = InfoNavigationView(user_id, player_data)
+            displayed_data = build_familier_view_model(entity_data) if is_familier else player_data
+
+            embed = build_base_info_embed(displayed_data)
+            view = InfoNavigationView(user_id, displayed_data)
             await interaction.response.send_message(embed=embed, view=view)
         except (KeyError, TypeError):
             await interaction.response.send_message("Les données du personnage sont invalides.")
