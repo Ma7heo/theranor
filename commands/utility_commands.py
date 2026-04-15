@@ -35,11 +35,16 @@ class UtilityCommands(commands.Cog):
         player_data = await self._load_player_or_none(user_id)
         if not player_data:
             return []
-        return [
+        choices = []
+        player_name = player_data.get("name")
+        if player_name and current.lower() in player_name.lower():
+            choices.append(app_commands.Choice(name=player_name, value=player_name))
+        choices.extend([
             app_commands.Choice(name=familier["nom"], value=familier["nom"])
             for familier in player_data.get("familiers", [])
             if current.lower() in familier["nom"].lower()
-        ]
+        ])
+        return choices
 
     async def _resolve_init_entity(self, user_id: str, familier_name: str | None):
         player_data = await self._load_player_or_none(user_id)
@@ -47,10 +52,12 @@ class UtilityCommands(commands.Cog):
             return None, None, "Joueur non trouvé."
         if not familier_name:
             return player_data["name"], player_data, None
+        if familier_name.lower() == player_data["name"].lower():
+            return player_data["name"], player_data, None
 
         familier_data = find_familier(player_data, familier_name)
         if not familier_data:
-            return None, None, "Familier non trouvé."
+            return None, None, "Entité non trouvée."
         return familier_data["nom"], familier_data, None
 
     async def _send_info(self, interaction: discord.Interaction, message: str, title: str = "Utilitaires"):
@@ -209,16 +216,16 @@ class UtilityCommands(commands.Cog):
         else:
             await self._send_error(interaction, "Erreur de blessure.", title="Blessure")
 
-    async def familier_autocomplete(self, interaction: discord.Interaction, current: str):
+    async def entity_autocomplete(self, interaction: discord.Interaction, current: str):
         user_id = str(interaction.user.id)
         return await self._get_familier_choices(user_id, current)
 
     @app_commands.command(name="init", description="Effectue un jet d'initiative.")
-    @app_commands.describe(familier="Nom du familier à utiliser (optionnel)")
-    @app_commands.autocomplete(familier=familier_autocomplete)
-    async def init(self, interaction: discord.Interaction, familier: str = None):
+    @app_commands.describe(entite="Nom du familier ou du personnage joueur")
+    @app_commands.autocomplete(entite=entity_autocomplete)
+    async def init(self, interaction: discord.Interaction, entite: str):
         user_id = str(interaction.user.id)
-        entity_name, entity_data, error = await self._resolve_init_entity(user_id, familier)
+        entity_name, entity_data, error = await self._resolve_init_entity(user_id, entite)
         if error:
             await self._send_error(interaction, error, title="Initiative")
             return

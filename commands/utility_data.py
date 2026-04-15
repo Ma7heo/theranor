@@ -221,19 +221,19 @@ COMMANDS_INFO = {
     },
     "ajouter_objet": {
         "description": "Ajoute un objet à l'inventaire d'un joueur.",
-        "usage": "/ajouter_objet destinataire:<membre> categorie:<...> nom:<...> [description] [bonus_type] [bonus_value] [degats] [familier:<...>]",
+        "usage": "/ajouter_objet destinataire:<membre> entite:<personnage|familier> categorie:<...> nom:<...> [description] [bonus_type] [bonus_value] [degats]",
     },
     "donner_objet": {
         "description": "Donne un objet d'un joueur à un autre.",
-        "usage": "/donner_objet destinataire:<membre> categorie:<...> nom:<...> [familier_source:<...>] [familier_destinataire:<...>]",
+        "usage": "/donner_objet entite_source:<personnage|familier> destinataire:<membre> entite_destinataire:<personnage|familier> categorie:<...> nom:<...>",
     },
     "retirer_objet": {
         "description": "Retire un objet de l'inventaire.",
-        "usage": "/retirer_objet nom:<...> [categorie] [joueur] [familier:<...>]",
+        "usage": "/retirer_objet entite:<personnage|familier> nom:<...> [categorie] [joueur]",
     },
     "modifier_objet": {
         "description": "Modifie la description d'un objet.",
-        "usage": "/modifier_objet nom_objet:<...> nouvelle_description:<...> [familier:<...>]",
+        "usage": "/modifier_objet entite:<personnage|familier> nom_objet:<...> nouvelle_description:<...>",
     },
     "ajouter_familier": {
         "description": "Crée un familier via un flow interactif (embed + pop-up + boutons).",
@@ -245,15 +245,15 @@ COMMANDS_INFO = {
     },
     "attaquer": {
         "description": "Effectue une attaque avec une arme ou pugilat.",
-        "usage": "/attaquer weapon_name:<...> [familier:<...>] [effets...]",
+        "usage": "/attaquer entite:<personnage|familier> weapon_name:<...> [effets...]",
     },
     "l": {
         "description": "Effectue un jet de compétence ou d'attribut.",
-        "usage": "/l skill_name:<...> [familier:<...>]",
+        "usage": "/l entite:<personnage|familier> skill_name:<...>",
     },
     "utiliser_magie": {
         "description": "Lance une magie avec effets optionnels.",
-        "usage": "/utiliser_magie magie_type:<magie1|magie2> [familier:<...>] [effets...]",
+        "usage": "/utiliser_magie entite:<personnage|familier> magie_type:<magie1|magie2> [effets...]",
     },
     "damage": {
         "description": "Inflige des dégâts à un joueur.",
@@ -273,7 +273,7 @@ COMMANDS_INFO = {
     },
     "armure": {
         "description": "Effectue un jet d'armure.",
-        "usage": "/armure [familier:<...>]",
+        "usage": "/armure entite:<personnage|familier>",
     },
     "repos_long": {
         "description": "Restaure PV/Mana d'un joueur ou de tous les joueurs.",
@@ -301,7 +301,7 @@ COMMANDS_INFO = {
     },
     "init": {
         "description": "Effectue un jet d'initiative.",
-        "usage": "/init [familier:<...>]",
+        "usage": "/init entite:<personnage|familier>",
     },
     "loot": {
         "description": "Génère un loot selon le palier choisi.",

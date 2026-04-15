@@ -75,6 +75,8 @@ class InventoryCommands(commands.Cog):
     def _resolve_inventory_entity(self, player_data, familier_name: str | None):
         if not familier_name:
             return player_data, False
+        if familier_name.lower() == player_data["name"].lower():
+            return player_data, False
         familier_data = find_familier(player_data, familier_name)
         if not familier_data:
             return None, None
@@ -91,11 +93,16 @@ class InventoryCommands(commands.Cog):
         player_data = await self._load_player_or_none(user_id)
         if not player_data:
             return []
-        return [
+        choices = []
+        player_name = player_data.get("name")
+        if player_name and current.lower() in player_name.lower():
+            choices.append(app_commands.Choice(name=player_name, value=player_name))
+        choices.extend([
             app_commands.Choice(name=familier["nom"], value=familier["nom"])
             for familier in player_data.get("familiers", [])
             if current.lower() in familier["nom"].lower()
-        ]
+        ])
+        return choices
 
     async def joueur_familier_autocomplete(self, interaction: discord.Interaction, current: str):
         target = getattr(interaction.namespace, "joueur", None)
@@ -103,11 +110,16 @@ class InventoryCommands(commands.Cog):
         player_data = await self._load_player_or_none(target_user_id)
         if not player_data:
             return []
-        return [
+        choices = []
+        player_name = player_data.get("name")
+        if player_name and current.lower() in player_name.lower():
+            choices.append(app_commands.Choice(name=player_name, value=player_name))
+        choices.extend([
             app_commands.Choice(name=familier["nom"], value=familier["nom"])
             for familier in player_data.get("familiers", [])
             if current.lower() in familier["nom"].lower()
-        ]
+        ])
+        return choices
 
     async def destinataire_familier_autocomplete(self, interaction: discord.Interaction, current: str):
         target = getattr(interaction.namespace, "destinataire", None)
@@ -116,11 +128,16 @@ class InventoryCommands(commands.Cog):
         player_data = await self._load_player_or_none(str(target.id))
         if not player_data:
             return []
-        return [
+        choices = []
+        player_name = player_data.get("name")
+        if player_name and current.lower() in player_name.lower():
+            choices.append(app_commands.Choice(name=player_name, value=player_name))
+        choices.extend([
             app_commands.Choice(name=familier["nom"], value=familier["nom"])
             for familier in player_data.get("familiers", [])
             if current.lower() in familier["nom"].lower()
-        ]
+        ])
+        return choices
 
     def ajouter_argents(self, inventaire, pc=0, pa=0, po=0):
         total_pc = self._coin_values_to_pc(pc, pa, po)
@@ -164,7 +181,12 @@ class InventoryCommands(commands.Cog):
         player_data = await self._load_player_or_none(user_id)
         if not player_data:
             return []
-        familier_name = getattr(interaction.namespace, "familier", None) or getattr(interaction.namespace, "familier_source", None)
+        familier_name = (
+            getattr(interaction.namespace, "entite", None)
+            or getattr(interaction.namespace, "entite_source", None)
+            or getattr(interaction.namespace, "familier", None)
+            or getattr(interaction.namespace, "familier_source", None)
+        )
         entity_data, _ = self._resolve_inventory_entity(player_data, familier_name)
         if familier_name and not entity_data:
             return []
@@ -348,34 +370,44 @@ class InventoryCommands(commands.Cog):
         )
 
     async def skill_autocomplete(self, interaction: discord.Interaction, current: str):
-        user_id = str(interaction.user.id)
-        skill_choices = await self._get_skill_choices(user_id)
+        target = getattr(interaction.namespace, "destinataire", None)
+        user_id = str(target.id) if target else str(interaction.user.id)
+        entity_selector = getattr(interaction.namespace, "entite", None)
+        skill_choices = await self._get_skill_choices(user_id, entity_selector)
         choices = [app_commands.Choice(name=choice, value=choice) for choice in skill_choices if current.lower() in choice.lower()]
         return choices
 
-    async def _get_skill_choices(self, user_id: str):
+    async def _get_skill_choices(self, user_id: str, entity_selector: str | None = None):
         player_data = await self._load_player_or_none(user_id)
         if not player_data:
             return []
-        attributes = list(player_data["attributes"].keys())
+        entity_data, _ = self._resolve_inventory_entity(player_data, entity_selector)
+        if entity_selector and not entity_data:
+            return []
+        entity_data = entity_data or player_data
+        attributes = list(entity_data["attributes"].keys())
         skills = []
-        for category_name in player_data["skills"]:
-            skills.extend(player_data["skills"][category_name].keys())
+        for category_name in entity_data["skills"]:
+            skills.extend(entity_data["skills"][category_name].keys())
         return attributes + skills
 
     @app_commands.command(name="ajouter_objet", description="Ajoute un objet à l'inventaire d'un joueur.")
-    @app_commands.autocomplete(categorie=category_autocomplete, bonus_type=skill_autocomplete, familier=destinataire_familier_autocomplete)
+    @app_commands.describe(
+        destinataire="Joueur qui recevra l'objet",
+        entite="Nom du familier ou du personnage du destinataire",
+    )
+    @app_commands.autocomplete(categorie=category_autocomplete, bonus_type=skill_autocomplete, entite=destinataire_familier_autocomplete)
     async def ajouter_objet(
         self,
         interaction: discord.Interaction,
         destinataire: discord.Member,
+        entite: str,
         categorie: str,
         nom: str,
         description: str = "",
         bonus_type: str = "",
         bonus_value: int = 0,
         degats: str = "0d0",
-        familier: str = None,
     ):
         if not self._is_admin(str(interaction.user.id)):
             await self._send_warning(interaction, "Vous n'êtes pas autorisé à utiliser cette commande.")
@@ -392,9 +424,9 @@ class InventoryCommands(commands.Cog):
             await self._send_warning(interaction, "Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
             return
 
-        recipient_entity, recipient_is_familier = self._resolve_inventory_entity(recipient, familier)
-        if familier and not recipient_entity:
-            await self._send_error(interaction, "Familier non trouvé.")
+        recipient_entity, recipient_is_familier = self._resolve_inventory_entity(recipient, entite)
+        if entite and not recipient_entity:
+            await self._send_error(interaction, "Entité non trouvée.")
             return
         recipient_entity, recipient_is_familier = self._resolve_entity_or_default(
             recipient_entity, recipient_is_familier, recipient
@@ -417,20 +449,24 @@ class InventoryCommands(commands.Cog):
         )
 
     @app_commands.command(name="donner_objet", description="Donne un objet à un autre joueur.")
+    @app_commands.describe(
+        entite_source="Nom du familier ou du personnage source",
+        entite_destinataire="Nom du familier ou du personnage destinataire",
+    )
     @app_commands.autocomplete(
+        entite_source=source_familier_autocomplete,
+        entite_destinataire=destinataire_familier_autocomplete,
         categorie=category_autocomplete,
         nom=item_name_autocomplete,
-        familier_source=source_familier_autocomplete,
-        familier_destinataire=destinataire_familier_autocomplete,
     )
     async def donner_objet(
         self,
         interaction: discord.Interaction,
+        entite_source: str,
         destinataire: discord.Member,
+        entite_destinataire: str,
         categorie: str,
         nom: str,
-        familier_source: str = None,
-        familier_destinataire: str = None,
     ):
         user_id = str(interaction.user.id)
         recipient_id = str(destinataire.id)
@@ -450,15 +486,15 @@ class InventoryCommands(commands.Cog):
             await self._send_warning(interaction, "Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
             return
 
-        source_entity, source_is_familier = self._resolve_inventory_entity(player, familier_source)
-        if familier_source and not source_entity:
-            await self._send_error(interaction, "Familier source non trouvé.")
+        source_entity, source_is_familier = self._resolve_inventory_entity(player, entite_source)
+        if entite_source and not source_entity:
+            await self._send_error(interaction, "Entité source non trouvée.")
             return
         source_entity, source_is_familier = self._resolve_entity_or_default(source_entity, source_is_familier, player)
 
-        target_entity, target_is_familier = self._resolve_inventory_entity(recipient, familier_destinataire)
-        if familier_destinataire and not target_entity:
-            await self._send_error(interaction, "Familier destinataire non trouvé.")
+        target_entity, target_is_familier = self._resolve_inventory_entity(recipient, entite_destinataire)
+        if entite_destinataire and not target_entity:
+            await self._send_error(interaction, "Entité destinataire non trouvée.")
             return
         target_entity, target_is_familier = self._resolve_entity_or_default(target_entity, target_is_familier, recipient)
 
@@ -486,14 +522,15 @@ class InventoryCommands(commands.Cog):
         )
 
     @app_commands.command(name="retirer_objet", description="Retire un objet de l'inventaire d'un joueur.")
-    @app_commands.autocomplete(categorie=category_autocomplete, nom=item_name_autocomplete, familier=joueur_familier_autocomplete)
+    @app_commands.describe(entite="Nom du familier ou du personnage joueur")
+    @app_commands.autocomplete(categorie=category_autocomplete, nom=item_name_autocomplete, entite=joueur_familier_autocomplete)
     async def retirer_objet(
         self,
         interaction: discord.Interaction,
+        entite: str,
         nom: str,
         categorie: str = "autres_objets",
         joueur: discord.Member = None,
-        familier: str = None,
     ):
         if joueur is None:
             joueur = interaction.user
@@ -513,9 +550,9 @@ class InventoryCommands(commands.Cog):
             await self._send_warning(interaction, "Catégorie invalide. Utilisez 'armures', 'armes' ou 'autres_objets'.")
             return
 
-        entity_data, is_familier = self._resolve_inventory_entity(player_data, familier)
-        if familier and not entity_data:
-            await self._send_error(interaction, "Familier non trouvé.")
+        entity_data, is_familier = self._resolve_inventory_entity(player_data, entite)
+        if entite and not entity_data:
+            await self._send_error(interaction, "Entité non trouvée.")
             return
         entity_data, is_familier = self._resolve_entity_or_default(entity_data, is_familier, player_data)
 
@@ -536,13 +573,14 @@ class InventoryCommands(commands.Cog):
         )
 
     @app_commands.command(name="modifier_objet", description="Modifie la description d'un objet.")
-    @app_commands.autocomplete(nom_objet=item_name_autocomplete, familier=source_familier_autocomplete)
+    @app_commands.describe(entite="Nom du familier ou du personnage joueur")
+    @app_commands.autocomplete(entite=source_familier_autocomplete, nom_objet=item_name_autocomplete)
     async def modifier_objet(
         self,
         interaction: discord.Interaction,
+        entite: str,
         nom_objet: str,
         nouvelle_description: str,
-        familier: str = None,
     ):
         user_id = str(interaction.user.id)
         player_data = await self._load_player_or_none(user_id)
@@ -551,9 +589,9 @@ class InventoryCommands(commands.Cog):
             await self._send_error(interaction, "Joueur non trouvé.")
             return
 
-        entity_data, is_familier = self._resolve_inventory_entity(player_data, familier)
-        if familier and not entity_data:
-            await self._send_error(interaction, "Familier non trouvé.")
+        entity_data, is_familier = self._resolve_inventory_entity(player_data, entite)
+        if entite and not entity_data:
+            await self._send_error(interaction, "Entité non trouvée.")
             return
         entity_data, is_familier = self._resolve_entity_or_default(entity_data, is_familier, player_data)
 
