@@ -3,6 +3,7 @@ from discord.ext import commands
 import asyncio
 import logging
 from config import TOKEN, PREFIX, INTENTS, GUILD_ID, ADMIN_IDS
+from commands.embed_utils import success_embed, warning_embed
 from database import DatabaseError, bootstrap_database
 
 logging.basicConfig(level=logging.INFO)
@@ -40,12 +41,12 @@ async def on_ready():
 @bot.command()
 async def sync(ctx: commands.Context):
     if str(ctx.author.id) not in ADMIN_IDS:
-        await ctx.send(content="Vous n'êtes pas autorisé à utiliser cette commande.")
+        await ctx.send(embed=warning_embed("Vous n'êtes pas autorisé à utiliser cette commande.", title="Sync commandes"))
         return
     guild = discord.Object(id=GUILD_ID)  # Utilisez l'ID de votre guilde
     bot.tree.copy_global_to(guild=guild)
     await bot.tree.sync(guild=guild)
-    await ctx.send(content="Les commandes ont été synchronisées avec succès.")
+    await ctx.send(embed=success_embed("Les commandes ont été synchronisées avec succès.", title="Sync commandes"))
 
 async def main():
     try:

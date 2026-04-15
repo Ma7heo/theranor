@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.embed_utils import error_embed, info_embed, roll_embed
 from commands.combat_logic import (
     MAGIE_CHOICES,
     CombatValidationError,
@@ -36,6 +37,15 @@ class CombatCommands(commands.Cog):
 
     async def _load_player_or_none(self, user_id):
         return await asyncio.to_thread(load_player, user_id)
+
+    async def _send_error(self, interaction: discord.Interaction, message: str):
+        await interaction.response.send_message(embed=error_embed(message, title="Combat"))
+
+    async def _send_info(self, interaction: discord.Interaction, message: str):
+        await interaction.response.send_message(embed=info_embed(message, title="Combat"))
+
+    async def _send_roll(self, interaction: discord.Interaction, message: str):
+        await interaction.response.send_message(embed=roll_embed(message, title="Jet de dés"))
 
     async def _resolve_entity_for_autocomplete(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
@@ -185,7 +195,7 @@ class CombatCommands(commands.Cog):
         user_id = str(interaction.user.id)
         player_data, entity_data, is_familier, error = await self._resolve_entity(user_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         effect_levels = (
@@ -203,19 +213,20 @@ class CombatCommands(commands.Cog):
         try:
             attack_ctx = resolve_attack_context(entity_data, weapon_name)
         except CombatValidationError as exc:
-            await interaction.response.send_message(str(exc))
+            await self._send_error(interaction, str(exc))
             return
 
         _, points_mana, use_mana = compute_attack_mana_cost(effect_levels)
         skill_level = entity_data["skills"][attack_ctx.category][attack_ctx.skill_name]
         if points_mana > skill_level:
-            await interaction.response.send_message(
+            await self._send_error(
+                interaction,
                 f"Vous n'avez pas assez de points de compétence. Compétence actuelle: {skill_level}, points requis: {points_mana}"
             )
             return
         entity_mana = self._get_mana(entity_data, is_familier)
         if entity_mana < use_mana:
-            await interaction.response.send_message("Mana insuffisant.")
+            await self._send_error(interaction, "Mana insuffisant.")
             return
 
         await interaction.response.defer()
@@ -231,7 +242,7 @@ class CombatCommands(commands.Cog):
         )
         response_lines.append(f"Mana consommé: {use_mana}")
         response_lines.append(f"Mana restant ({self._entity_name(entity_data, is_familier)}): {self._get_mana(entity_data, is_familier)}")
-        await interaction.followup.send("\n".join(response_lines))
+        await interaction.followup.send(embed=roll_embed("\n".join(response_lines), title="Résultat d'attaque"))
 
     async def skill_autocomplete(self, interaction: discord.Interaction, current: str):
         entity_data = await self._resolve_entity_for_autocomplete(interaction)
@@ -253,7 +264,7 @@ class CombatCommands(commands.Cog):
         user_id = str(interaction.user.id)
         _, entity_data, _, error = await self._resolve_entity(user_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         skill_name = skill_name.lower()
@@ -263,7 +274,8 @@ class CombatCommands(commands.Cog):
 
         if skill_name in entity_data["attributes"]:
             base_roll, bonus, total = roll_with_bonus(entity_data, skill_name)
-            await interaction.response.send_message(
+            await self._send_roll(
+                interaction,
                 f"Lancer de dé pour l'attribut {skill_name.upper()} : {base_roll} + {bonus} = {total}"
             )
             return
@@ -274,12 +286,13 @@ class CombatCommands(commands.Cog):
         )
         if category:
             base_roll, bonus, total = roll_with_bonus(entity_data, skill_name, category)
-            await interaction.response.send_message(
+            await self._send_roll(
+                interaction,
                 f"Lancer de dé pour la compétence {skill_name} ({category}) : {base_roll} + {bonus} = {total}"
             )
             return
 
-        await interaction.response.send_message(f"Compétence ou attribut {skill_name} non reconnu.")
+        await self._send_error(interaction, f"Compétence ou attribut {skill_name} non reconnu.")
 
     async def magic_autocomplete(self, interaction: discord.Interaction, current: str):
         return [
@@ -325,7 +338,7 @@ class CombatCommands(commands.Cog):
         user_id = str(interaction.user.id)
         player_data, entity_data, is_familier, error = await self._resolve_entity(user_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         effect_levels = (
@@ -348,13 +361,13 @@ class CombatCommands(commands.Cog):
             magie_level = entity_data["skills"]["intelligence"][magie_type]
             ensure_magic_level(magie_name, magie_level, total_effects)
         except CombatValidationError as exc:
-            await interaction.response.send_message(str(exc))
+            await self._send_error(interaction, str(exc))
             return
 
         mana_cost = compute_mana_cost(total_effects)
         entity_mana = self._get_mana(entity_data, is_familier)
         if entity_mana < mana_cost:
-            await interaction.response.send_message("Mana insuffisant.")
+            await self._send_error(interaction, "Mana insuffisant.")
             return
 
         base_roll, bonus, total_roll = roll_with_bonus(entity_data, magie_type, "intelligence")
@@ -368,7 +381,7 @@ class CombatCommands(commands.Cog):
         response_lines.append(
             f"Coût de mana: {mana_cost}. Mana restant ({self._entity_name(entity_data, is_familier)}): {self._get_mana(entity_data, is_familier)}."
         )
-        await interaction.response.send_message("\n".join(response_lines))
+        await interaction.response.send_message(embed=roll_embed("\n".join(response_lines), title="Résultat de magie"))
 
     @app_commands.command(name="damage", description="Inflige des dégâts à un joueur.")
     @app_commands.describe(joueur="Le joueur à qui infliger des dégâts", familier="Nom du familier ciblé (optionnel)", expression="Expression de dégâts", armure="Divise les dégâts par deux si vrai")
@@ -377,14 +390,15 @@ class CombatCommands(commands.Cog):
         player_id = str(joueur.id)
         player_data, entity_data, is_familier, error = await self._resolve_entity(player_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         degats, _ = parse_dice_expression(expression)
         if armure:
             degats = (degats + 1) // 2
         await self._apply_pv_delta(player_id, player_data, entity_data, is_familier, -degats)
-        await interaction.response.send_message(
+        await self._send_roll(
+            interaction,
             f"{self._entity_name(entity_data, is_familier)} ({joueur.mention}) a subi {degats} dégâts. PV actuels: {self._get_pv(entity_data, is_familier)}"
         )
 
@@ -396,12 +410,13 @@ class CombatCommands(commands.Cog):
         player_id = str(target.id)
         player_data, entity_data, is_familier, error = await self._resolve_entity(player_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         soins, _ = parse_dice_expression(expression)
         await self._apply_pv_delta(player_id, player_data, entity_data, is_familier, soins)
-        await interaction.response.send_message(
+        await self._send_roll(
+            interaction,
             f"{self._entity_name(entity_data, is_familier)} ({target.mention}) a été soigné de {soins} PV. PV actuels: {self._get_pv(entity_data, is_familier)}"
         )
 
@@ -413,12 +428,13 @@ class CombatCommands(commands.Cog):
         player_id = str(target.id)
         player_data, entity_data, is_familier, error = await self._resolve_entity(player_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         degats, _ = parse_dice_expression(expression)
         await self._apply_mana_delta(player_id, player_data, entity_data, is_familier, -degats)
-        await interaction.response.send_message(
+        await self._send_roll(
+            interaction,
             f"{self._entity_name(entity_data, is_familier)} ({target.mention}) a perdu {degats} de mana. Mana actuels: {self._get_mana(entity_data, is_familier)}"
         )
 
@@ -430,12 +446,13 @@ class CombatCommands(commands.Cog):
         player_id = str(target.id)
         player_data, entity_data, is_familier, error = await self._resolve_entity(player_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         soins, _ = parse_dice_expression(expression)
         await self._apply_mana_delta(player_id, player_data, entity_data, is_familier, soins)
-        await interaction.response.send_message(
+        await self._send_roll(
+            interaction,
             f"{self._entity_name(entity_data, is_familier)} ({target.mention}) a récupéré {soins} de mana. Mana actuels: {self._get_mana(entity_data, is_familier)}"
         )
 
@@ -446,7 +463,7 @@ class CombatCommands(commands.Cog):
         user_id = str(interaction.user.id)
         _, entity_data, is_familier, error = await self._resolve_entity(user_id, familier)
         if error:
-            await interaction.response.send_message(error)
+            await self._send_error(interaction, error)
             return
 
         armure = entity_data["attributes"].get("armure", 0)
@@ -464,7 +481,7 @@ class CombatCommands(commands.Cog):
             message += "\nSuccès! Vous prendrez moitié moins de dégâts."
         else:
             message += "\nÉchec! Vous prendrez les dégâts complets."
-        await interaction.response.send_message(message)
+        await self._send_roll(interaction, message)
 
 
 async def setup(bot):

@@ -1,6 +1,7 @@
 import discord
 from discord import Interaction
 
+from commands.embed_utils import warning_embed
 from commands.player_logic import build_base_info_embed
 
 
@@ -81,7 +82,10 @@ class CreationOwnerView(discord.ui.View):
 
     async def interaction_check(self, interaction: Interaction) -> bool:
         if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message("Cette interaction ne vous est pas destinée.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=warning_embed("Cette interaction ne vous est pas destinée.", title="Interaction"),
+                ephemeral=True,
+            )
             return False
         return True
 
