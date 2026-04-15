@@ -1,4 +1,5 @@
 import asyncio
+import copy
 
 import discord
 from discord import Interaction, app_commands
@@ -8,16 +9,24 @@ from commands.player_logic import (
     ATTRIBUTE_CHOICES,
     CREATION_STEPS,
     RACE_BONUS,
-    apply_attribute_distribution,
     apply_race_bonus,
-    apply_skill_distribution,
     build_base_info_embed,
     build_character_list_message,
     compute_level_up_gain,
     finalize_character_stats,
     new_character_template,
 )
-from commands.player_views import InfoNavigationView
+from commands.player_views import (
+    AttributeDistributionModal,
+    CharacterIdentityModal,
+    InfoNavigationView,
+    LevelUpAttributeView,
+    MagicSelectionView,
+    OpenModalView,
+    RaceSelectionView,
+    SkillCategoryView,
+    SkillDistributionView,
+)
 from database import (
     DatabaseError,
     add_character,
@@ -34,11 +43,19 @@ from database import (
 
 
 class PlayerCommands(commands.Cog):
-    LEVEL_UP_TIMEOUT_SECONDS = 120
+    SKILL_TABLE_CATEGORY_ORDER = ("force", "agilite", "charisme", "intelligence")
+    ATTRIBUTE_LABELS = {"for": "FOR", "agi": "AGI", "cha": "CHA", "int": "INT"}
+    SKILL_CATEGORY_LABELS = {
+        "force": "FORCE",
+        "agilite": "AGILITE",
+        "charisme": "CHARISME",
+        "intelligence": "INTELLIGENCE",
+    }
 
     def __init__(self, bot):
         self.bot = bot
         self.creation_sessions = {}
+        self.level_up_sessions = {}
         self.creation_steps = CREATION_STEPS
         self.race_bonus = RACE_BONUS
 
@@ -59,22 +76,134 @@ class PlayerCommands(commands.Cog):
             return raw_value
         raise TypeError
 
-    async def next_creation_step(self, channel, user_id):
-        session = self.creation_sessions[user_id]
+    async def _send_interaction_message(self, interaction: Interaction, content=None, view=None, embed=None, ephemeral=True):
+        if interaction.response.is_done():
+            await interaction.followup.send(content=content, view=view, embed=embed, ephemeral=ephemeral)
+            return
+        await interaction.response.send_message(content=content, view=view, embed=embed, ephemeral=ephemeral)
+
+    def _initialize_skill_step(self, session):
+        if "skill_step" in session:
+            return
+
+        values = {}
+        for category, skills_dict in session["data"]["skills"].items():
+            values[category] = {skill_name: 0 for skill_name in skills_dict}
+        session["skill_step"] = {"values": values}
+
+    @staticmethod
+    def _display_skill_name(skill_name: str) -> str:
+        return skill_name.replace("_", " ")
+
+    @staticmethod
+    def _count_allocated_skill_points(values: dict[str, dict[str, int]]) -> int:
+        return sum(skill_value for category_values in values.values() for skill_value in category_values.values())
+
+    def _build_skill_table_text(self, player_data, allocated_values: dict[str, dict[str, int]]) -> str:
+        attributes = player_data["attributes"]
+        category_pairs = [("force", "agilite"), ("charisme", "intelligence")]
+        lines = []
+
+        for pair_index, (left_category, right_category) in enumerate(category_pairs):
+            left_header = f"{self.SKILL_CATEGORY_LABELS[left_category]} ({attributes[left_category[:3]]})"
+            right_header = f"{self.SKILL_CATEGORY_LABELS[right_category]} ({attributes[right_category[:3]]})"
+
+            left_rows = []
+            for skill_name in player_data["skills"][left_category]:
+                current_level = player_data["skills"][left_category][skill_name]
+                allocated_level = allocated_values[left_category][skill_name]
+                left_rows.append(f"{self._display_skill_name(skill_name)}: {current_level + allocated_level}")
+
+            right_rows = []
+            for skill_name in player_data["skills"][right_category]:
+                current_level = player_data["skills"][right_category][skill_name]
+                allocated_level = allocated_values[right_category][skill_name]
+                right_rows.append(f"{self._display_skill_name(skill_name)}: {current_level + allocated_level}")
+
+            left_width = max(len(left_header), *(len(row) for row in left_rows))
+            right_width = max(len(right_header), *(len(row) for row in right_rows))
+
+            lines.append(f"{left_header.ljust(left_width)} | {right_header.ljust(right_width)}")
+            lines.append(f"{'_' * left_width} | {'_' * right_width}")
+
+            row_count = max(len(left_rows), len(right_rows))
+            for row_index in range(row_count):
+                left_cell = left_rows[row_index] if row_index < len(left_rows) else ""
+                right_cell = right_rows[row_index] if row_index < len(right_rows) else ""
+                lines.append(f"{left_cell.ljust(left_width)} | {right_cell.ljust(right_width)}")
+
+            if pair_index == 0:
+                lines.append("")
+
+        return "```text\n" + "\n".join(lines) + "\n```"
+
+    def _build_skill_embed(
+        self,
+        player_data,
+        allocated_values: dict[str, dict[str, int]],
+        required_points: int,
+        selected_category: str | None = None,
+        title_prefix: str = "Répartition des compétences",
+    ):
+        allocated_points = self._count_allocated_skill_points(allocated_values)
+        remaining_points = required_points - allocated_points
+
+        title = title_prefix
+        if selected_category:
+            title += f" - {self.SKILL_CATEGORY_LABELS.get(selected_category, selected_category.upper())}"
+
+        embed = discord.Embed(title=title, color=discord.Color.blurple())
+        embed.description = self._build_skill_table_text(player_data, allocated_values)
+        embed.add_field(name="Points", value=f"{allocated_points}/{required_points} (restants: {remaining_points})", inline=False)
+        if selected_category:
+            attr_value = player_data["attributes"][selected_category[:3]]
+            embed.add_field(name="Règle de catégorie", value=f"Chaque compétence <= {attr_value}", inline=False)
+        else:
+            embed.add_field(name="Règles", value="Chaque compétence doit rester <= au niveau de sa stat.", inline=False)
+        return embed
+
+    async def _send_creation_step_prompt(self, interaction: Interaction, user_id: str):
+        session = self.creation_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune création en cours. Lancez `/creer_personnage`.")
+            return
+
         step = session["step"]
-        if step < len(self.creation_steps):
-            question = self.creation_steps[step]["question"]
-            options = self.creation_steps[step]["options"]
-            if options:
-                message = await channel.send(question + "\n" + "\n".join([f"{i + 1}. {option}" for i, option in enumerate(options)]))
-                session["reaction_message_id"] = message.id
-                session["channel_id"] = channel.id
-                for i in range(len(options)):
-                    await message.add_reaction(str(i + 1) + "\u20E3")
-            else:
-                session["reaction_message_id"] = None
-                session["channel_id"] = channel.id
-                await channel.send(question)
+        if step in (0, 1):
+            await interaction.response.send_modal(CharacterIdentityModal(self, user_id))
+            return
+
+        if step == 2:
+            view = RaceSelectionView(self, user_id, self.creation_steps[2]["options"])
+            await self._send_interaction_message(interaction, self.creation_steps[2]["question"], view=view)
+            return
+
+        if step == 3:
+            await interaction.response.send_modal(AttributeDistributionModal(self, user_id))
+            return
+
+        if step == 4:
+            await self.show_skill_main_menu(interaction, user_id)
+            return
+
+        if step == 5:
+            view = MagicSelectionView(self, user_id, self.creation_steps[5]["options"], step=5)
+            await self._send_interaction_message(interaction, self.creation_steps[5]["question"], view=view)
+            return
+
+        if step == 6:
+            already_selected = set(session["data"]["magie"])
+            options = [option for option in self.creation_steps[6]["options"] if option not in already_selected]
+            view = MagicSelectionView(self, user_id, options, step=6)
+            await self._send_interaction_message(interaction, self.creation_steps[6]["question"], view=view)
+            return
+
+        await self._finalize_creation(interaction, user_id)
+
+    async def _finalize_creation(self, interaction: Interaction, user_id: str):
+        session = self.creation_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune création en cours. Lancez `/creer_personnage`.")
             return
 
         player_data = session["data"]
@@ -82,111 +211,546 @@ class PlayerCommands(commands.Cog):
         try:
             await asyncio.to_thread(add_character, user_id, player_data)
         except DatabaseError:
-            await channel.send("Erreur lors de la sauvegarde du personnage.")
             del self.creation_sessions[user_id]
+            await self._send_interaction_message(interaction, "Erreur lors de la sauvegarde du personnage.")
             return
-        await channel.send(f"Création de personnage terminée pour <@{user_id}> : {player_data}")
+
         del self.creation_sessions[user_id]
+        await self._send_interaction_message(
+            interaction,
+            (
+                f"Création terminée: **{player_data['name']}** ({player_data['race']})\n"
+                f"HP: {player_data['pv_actu']}/{player_data['pv_max']} | "
+                f"MANA: {player_data['mana_actu']}/{player_data['mana_max']}\n"
+                f"Magies: {', '.join(player_data['magie'])}"
+            ),
+        )
 
-    async def _handle_creation_text_step(self, message, session, step):
-        if step == 0:
-            session["data"]["name"] = message.content
-            return True
-        if step == 1:
-            try:
-                session["data"]["age"] = int(message.content)
-            except ValueError:
-                await message.channel.send("Veuillez entrer un nombre valide pour l'âge.")
-                return False
-            return True
-        if step == 3:
-            try:
-                apply_attribute_distribution(session["data"], message.content)
-            except ValueError:
-                await message.channel.send("Vous devez distribuer exactement 4 points dans les attributs.")
-                return False
-            except KeyError as exc:
-                await message.channel.send(f"Attribut {exc.args[0]} non reconnu.")
-                return False
-            return True
-        if step == 4:
-            try:
-                apply_skill_distribution(session["data"], message.content)
-            except ValueError as exc:
-                reason = exc.args[0]
-                if reason == "skill_points":
-                    required_points = 9 if session["data"]["race"] == "Humain" else 8
-                    await message.channel.send(f"Vous devez distribuer exactement {required_points} points dans les compétences.")
-                    return False
-                if isinstance(reason, str) and reason.startswith("skill_cap:"):
-                    _, skill_name, category = reason.split(":")
-                    await message.channel.send(
-                        f"Le niveau de {skill_name} ne peut pas dépasser le niveau de {category[:3].upper()}."
-                    )
-                    return False
-                await message.channel.send("Veuillez entrer des points valides pour les compétences.")
-                return False
-            except KeyError as exc:
-                await message.channel.send(f"Compétence {exc.args[0]} non reconnue.")
-                return False
-            return True
-        return True
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        if message.author.bot:
+    async def handle_creation_identity_submit(self, interaction: Interaction, user_id: str, name: str, age_raw: str):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != 0:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
             return
 
-        user_id = str(message.author.id)
-        if user_id in self.creation_sessions:
-            session = self.creation_sessions[user_id]
-            step = session["step"]
-            current_step = self.creation_steps[step]
-            if not current_step["options"]:
-                is_valid = await self._handle_creation_text_step(message, session, step)
-                if is_valid:
-                    session["step"] += 1
-                    await self.next_creation_step(message.channel, user_id)
-
-        await self.bot.process_commands(message)
-
-    @commands.Cog.listener()
-    async def on_reaction_add(self, reaction, user):
-        if user.bot:
+        name = name.strip()
+        if not name:
+            retry_view = OpenModalView(
+                user_id,
+                lambda: CharacterIdentityModal(self, user_id),
+                "Re-saisir nom et âge",
+            )
+            await self._send_interaction_message(interaction, "Le nom du personnage ne peut pas être vide.", view=retry_view)
             return
 
-        user_id = str(user.id)
-        if user_id not in self.creation_sessions:
+        try:
+            age = int(age_raw.strip())
+            if age <= 0:
+                raise ValueError
+        except ValueError:
+            retry_view = OpenModalView(
+                user_id,
+                lambda: CharacterIdentityModal(self, user_id),
+                "Re-saisir nom et âge",
+            )
+            await self._send_interaction_message(interaction, "Veuillez entrer un âge valide (nombre entier positif).", view=retry_view)
             return
 
-        session = self.creation_sessions[user_id]
-        if reaction.message.channel.id != session.get("channel_id"):
-            return
-        if reaction.message.id != session.get("reaction_message_id"):
+        session["data"]["name"] = name
+        session["data"]["age"] = age
+        session["step"] = 2
+        await self._send_creation_step_prompt(interaction, user_id)
+
+    async def handle_creation_race_selection(self, interaction: Interaction, user_id: str, selected_race: str):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != 2:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
             return
 
-        step = session["step"]
-        if step >= len(self.creation_steps) or not self.creation_steps[step]["options"]:
+        apply_race_bonus(session["data"], selected_race)
+        session["step"] = 3
+        await self._send_creation_step_prompt(interaction, user_id)
+
+    async def handle_creation_attribute_submit(self, interaction: Interaction, user_id: str, values: dict[str, str]):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != 3:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
             return
 
-        options = self.creation_steps[step]["options"]
-        emoji_choices = [str(i + 1) + "\u20E3" for i in range(len(options))]
-        if reaction.emoji not in emoji_choices:
+        try:
+            increments = {}
+            total_points = 0
+            for attr_key in ("for", "agi", "cha", "int"):
+                raw_value = values.get(attr_key, "").strip()
+                parsed_value = int(raw_value)
+                if parsed_value < 0:
+                    raise ValueError
+                increments[attr_key] = parsed_value
+                total_points += parsed_value
+            if total_points != 4:
+                raise ValueError
+        except (ValueError, TypeError):
+            retry_view = OpenModalView(user_id, lambda: AttributeDistributionModal(self, user_id), "Re-saisir les attributs")
+            await self._send_interaction_message(interaction, "Vous devez distribuer exactement 4 points dans les attributs.", view=retry_view)
             return
 
-        selected_option = options[int(reaction.emoji[0]) - 1]
-        if step == 2:
-            apply_race_bonus(session["data"], selected_option)
-        elif step in (5, 6):
-            if selected_option in session["data"]["magie"]:
-                await reaction.message.channel.send(
-                    f"La magie {selected_option} a déjà été choisie. Veuillez en choisir une autre."
+        updated_attributes = session["data"]["attributes"].copy()
+        for attr_key, increment in increments.items():
+            updated_attributes[attr_key] += increment
+        session["data"]["attributes"] = updated_attributes
+
+        session["step"] = 4
+        await self._send_creation_step_prompt(interaction, user_id)
+
+    async def show_skill_main_menu(self, interaction: Interaction, user_id: str):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != 4:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
+            return
+
+        self._initialize_skill_step(session)
+        required_points = 9 if session["data"]["race"] == "Humain" else 8
+        embed = self._build_skill_embed(
+            session["data"],
+            session["skill_step"]["values"],
+            required_points,
+            title_prefix="Création - Compétences",
+        )
+        content = (
+            f"Répartissez exactement {required_points} points.\n"
+            "Cliquez sur une stat pour ajuster ses compétences avec des boutons `+/-`, puis cliquez sur `Valider`."
+        )
+        view = SkillDistributionView(
+            self,
+            user_id,
+            open_category_handler=self.open_skill_category_panel,
+            validate_handler=self.handle_skill_validate,
+        )
+        if interaction.response.is_done():
+            await interaction.followup.send(content=content, embed=embed, view=view, ephemeral=True)
+            return
+        if interaction.message:
+            await interaction.response.edit_message(content=content, embed=embed, view=view)
+            return
+        await interaction.response.send_message(content=content, embed=embed, view=view, ephemeral=True)
+
+    async def open_skill_category_panel(self, interaction: Interaction, user_id: str, category: str):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != 4:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
+            return
+
+        self._initialize_skill_step(session)
+        if category not in session["data"]["skills"]:
+            await self._send_interaction_message(interaction, "Catégorie de compétence inconnue.")
+            return
+
+        skills = list(session["data"]["skills"][category].keys())
+        required_points = 9 if session["data"]["race"] == "Humain" else 8
+        embed = self._build_skill_embed(
+            session["data"],
+            session["skill_step"]["values"],
+            required_points,
+            selected_category=category,
+            title_prefix="Création - Compétences",
+        )
+        content = "Utilisez les boutons pour modifier les compétences de cette catégorie, puis `Retour`."
+        view = SkillCategoryView(
+            self,
+            user_id,
+            category,
+            skills,
+            adjust_handler=self.handle_skill_adjust,
+            back_handler=self.show_skill_main_menu,
+        )
+        await interaction.response.edit_message(content=content, embed=embed, view=view)
+
+    async def handle_skill_adjust(
+        self,
+        interaction: Interaction,
+        user_id: str,
+        category: str,
+        skill_name: str,
+        delta: int,
+    ):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != 4:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
+            return
+
+        self._initialize_skill_step(session)
+        if category not in session["skill_step"]["values"] or skill_name not in session["skill_step"]["values"][category]:
+            await self._send_interaction_message(interaction, "Catégorie de compétence inconnue.")
+            return
+
+        values = session["skill_step"]["values"]
+        current_value = values[category][skill_name]
+        updated_value = current_value + delta
+
+        if updated_value < 0:
+            await self._send_interaction_message(interaction, "Impossible de descendre en dessous de 0.", ephemeral=True)
+            return
+
+        required_points = 9 if session["data"]["race"] == "Humain" else 8
+        allocated_points = self._count_allocated_skill_points(values)
+        if delta > 0 and allocated_points >= required_points:
+            await self._send_interaction_message(
+                interaction,
+                f"Tous les points sont déjà distribués ({required_points}/{required_points}).",
+                ephemeral=True,
+            )
+            return
+
+        category_attr = session["data"]["attributes"][category[:3]]
+        if updated_value > category_attr:
+            await self._send_interaction_message(
+                interaction,
+                f"{self._display_skill_name(skill_name)} ne peut pas dépasser {category_attr} ({self.SKILL_CATEGORY_LABELS.get(category, category.upper())}).",
+                ephemeral=True,
+            )
+            return
+
+        values[category][skill_name] = updated_value
+
+        skills = list(session["data"]["skills"][category].keys())
+        required_points = 9 if session["data"]["race"] == "Humain" else 8
+        embed = self._build_skill_embed(
+            session["data"],
+            session["skill_step"]["values"],
+            required_points,
+            selected_category=category,
+            title_prefix="Création - Compétences",
+        )
+        content = "Utilisez les boutons pour modifier les compétences de cette catégorie, puis `Retour`."
+        view = SkillCategoryView(
+            self,
+            user_id,
+            category,
+            skills,
+            adjust_handler=self.handle_skill_adjust,
+            back_handler=self.show_skill_main_menu,
+        )
+        await interaction.response.edit_message(content=content, embed=embed, view=view)
+
+    def _apply_skill_distribution_values(self, player_data, values, required_points: int):
+        total_points = sum(skill_value for category_values in values.values() for skill_value in category_values.values())
+        if total_points != required_points:
+            raise ValueError("skill_points")
+
+        updated_skills = copy.deepcopy(player_data["skills"])
+        for category, category_values in values.items():
+            attr_key = category[:3]
+            attr_value = player_data["attributes"][attr_key]
+            for skill_name, skill_value in category_values.items():
+                if skill_value > attr_value:
+                    raise ValueError(f"skill_cap:{skill_name}:{category}")
+                updated_skills[category][skill_name] += skill_value
+
+        player_data["skills"] = updated_skills
+
+    async def handle_skill_validate(self, interaction: Interaction, user_id: str):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != 4:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
+            return
+
+        self._initialize_skill_step(session)
+        required_points = 9 if session["data"]["race"] == "Humain" else 8
+
+        try:
+            self._apply_skill_distribution_values(session["data"], session["skill_step"]["values"], required_points)
+        except ValueError as exc:
+            reason = exc.args[0]
+            if reason == "skill_points":
+                await self._send_interaction_message(
+                    interaction,
+                    f"Vous devez distribuer exactement {required_points} points dans les compétences.",
                 )
                 return
-            session["data"]["magie"].append(selected_option)
+            if isinstance(reason, str) and reason.startswith("skill_cap:"):
+                _, skill_name, category = reason.split(":")
+                await self._send_interaction_message(
+                    interaction,
+                    f"Le niveau de {skill_name} ne peut pas dépasser le niveau de {category[:3].upper()}.",
+                )
+                return
+            await self._send_interaction_message(interaction, "Valeurs de compétences invalides.")
+            return
 
+        session.pop("skill_step", None)
+        session["step"] = 5
+        await self._send_creation_step_prompt(interaction, user_id)
+
+    def _new_level_up_session(self, player_data):
+        required_skill_points = 3 if player_data["race"] == "Humain" else 2
+        skill_values = {}
+        for category, skills_dict in player_data["skills"].items():
+            skill_values[category] = {skill_name: 0 for skill_name in skills_dict}
+        return {
+            "data": copy.deepcopy(player_data),
+            "target_level": player_data["level"] + 1,
+            "selected_attribute": None,
+            "required_skill_points": required_skill_points,
+            "skill_values": skill_values,
+        }
+
+    def _build_level_up_attribute_embed(self, session):
+        player_data = session["data"]
+        target_level = session["target_level"]
+        embed = discord.Embed(title=f"Montée de niveau vers {target_level}", color=discord.Color.gold())
+        lines = []
+        for attr_key in ("for", "agi", "cha", "int"):
+            lines.append(f"{self.ATTRIBUTE_LABELS[attr_key]}: {player_data['attributes'][attr_key]}")
+        embed.description = "Choisissez l'attribut à augmenter de +1.\n```text\n" + "\n".join(lines) + "\n```"
+        return embed
+
+    async def show_level_up_attribute_menu(self, interaction: Interaction, user_id: str):
+        session = self.level_up_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune montée de niveau en cours. Lancez `/monter_niveau`.")
+            return
+
+        embed = self._build_level_up_attribute_embed(session)
+        content = f"Distribuez 1 point d'attribut pour le niveau {session['target_level']}."
+        view = LevelUpAttributeView(self, user_id)
+
+        if interaction.response.is_done():
+            await interaction.followup.send(content=content, embed=embed, view=view, ephemeral=True)
+            return
+        if interaction.message:
+            await interaction.response.edit_message(content=content, embed=embed, view=view)
+            return
+        await interaction.response.send_message(content=content, embed=embed, view=view, ephemeral=True)
+
+    async def handle_level_up_attribute_selection(self, interaction: Interaction, user_id: str, attr_key: str):
+        session = self.level_up_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune montée de niveau en cours. Lancez `/monter_niveau`.")
+            return
+
+        if attr_key not in session["data"]["attributes"]:
+            await self._send_interaction_message(interaction, "Attribut invalide.")
+            return
+
+        if session["selected_attribute"] is not None:
+            await self._send_interaction_message(interaction, "Le point d'attribut est déjà distribué.", ephemeral=True)
+            return
+
+        session["data"]["attributes"][attr_key] += 1
+        session["selected_attribute"] = attr_key
+        await self.show_level_up_skill_main_menu(interaction, user_id)
+
+    async def show_level_up_skill_main_menu(self, interaction: Interaction, user_id: str):
+        session = self.level_up_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune montée de niveau en cours. Lancez `/monter_niveau`.")
+            return
+
+        if session["selected_attribute"] is None:
+            await self.show_level_up_attribute_menu(interaction, user_id)
+            return
+
+        embed = self._build_skill_embed(
+            session["data"],
+            session["skill_values"],
+            session["required_skill_points"],
+            title_prefix=f"Niveau {session['target_level']} - Compétences",
+        )
+        attr_label = self.ATTRIBUTE_LABELS[session["selected_attribute"]]
+        content = (
+            f"Attribut choisi: {attr_label} +1.\n"
+            f"Répartissez {session['required_skill_points']} points de compétence."
+        )
+        view = SkillDistributionView(
+            self,
+            user_id,
+            open_category_handler=self.open_level_up_skill_category_panel,
+            validate_handler=self.handle_level_up_validate,
+        )
+
+        if interaction.response.is_done():
+            await interaction.followup.send(content=content, embed=embed, view=view, ephemeral=True)
+            return
+        if interaction.message:
+            await interaction.response.edit_message(content=content, embed=embed, view=view)
+            return
+        await interaction.response.send_message(content=content, embed=embed, view=view, ephemeral=True)
+
+    async def open_level_up_skill_category_panel(self, interaction: Interaction, user_id: str, category: str):
+        session = self.level_up_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune montée de niveau en cours. Lancez `/monter_niveau`.")
+            return
+
+        if session["selected_attribute"] is None:
+            await self.show_level_up_attribute_menu(interaction, user_id)
+            return
+
+        if category not in session["data"]["skills"]:
+            await self._send_interaction_message(interaction, "Catégorie de compétence inconnue.")
+            return
+
+        embed = self._build_skill_embed(
+            session["data"],
+            session["skill_values"],
+            session["required_skill_points"],
+            selected_category=category,
+            title_prefix=f"Niveau {session['target_level']} - Compétences",
+        )
+        skills = list(session["data"]["skills"][category].keys())
+        content = "Utilisez les boutons pour modifier les compétences de cette catégorie, puis `Retour`."
+        view = SkillCategoryView(
+            self,
+            user_id,
+            category,
+            skills,
+            adjust_handler=self.handle_level_up_skill_adjust,
+            back_handler=self.show_level_up_skill_main_menu,
+        )
+        await interaction.response.edit_message(content=content, embed=embed, view=view)
+
+    async def handle_level_up_skill_adjust(
+        self,
+        interaction: Interaction,
+        user_id: str,
+        category: str,
+        skill_name: str,
+        delta: int,
+    ):
+        session = self.level_up_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune montée de niveau en cours. Lancez `/monter_niveau`.")
+            return
+
+        if session["selected_attribute"] is None:
+            await self.show_level_up_attribute_menu(interaction, user_id)
+            return
+
+        values = session["skill_values"]
+        if category not in values or skill_name not in values[category]:
+            await self._send_interaction_message(interaction, "Compétence inconnue.")
+            return
+
+        current_value = values[category][skill_name]
+        updated_value = current_value + delta
+        if updated_value < 0:
+            await self._send_interaction_message(interaction, "Impossible de descendre en dessous de 0.", ephemeral=True)
+            return
+
+        if delta > 0:
+            allocated_points = self._count_allocated_skill_points(values)
+            if allocated_points >= session["required_skill_points"]:
+                await self._send_interaction_message(
+                    interaction,
+                    f"Tous les points sont déjà distribués ({session['required_skill_points']}/{session['required_skill_points']}).",
+                    ephemeral=True,
+                )
+                return
+
+        category_attr = session["data"]["attributes"][category[:3]]
+        if updated_value > category_attr:
+            await self._send_interaction_message(
+                interaction,
+                f"{self._display_skill_name(skill_name)} ne peut pas dépasser {category_attr} ({self.SKILL_CATEGORY_LABELS.get(category, category.upper())}).",
+                ephemeral=True,
+            )
+            return
+
+        values[category][skill_name] = updated_value
+        embed = self._build_skill_embed(
+            session["data"],
+            session["skill_values"],
+            session["required_skill_points"],
+            selected_category=category,
+            title_prefix=f"Niveau {session['target_level']} - Compétences",
+        )
+        skills = list(session["data"]["skills"][category].keys())
+        content = "Utilisez les boutons pour modifier les compétences de cette catégorie, puis `Retour`."
+        view = SkillCategoryView(
+            self,
+            user_id,
+            category,
+            skills,
+            adjust_handler=self.handle_level_up_skill_adjust,
+            back_handler=self.show_level_up_skill_main_menu,
+        )
+        await interaction.response.edit_message(content=content, embed=embed, view=view)
+
+    async def handle_level_up_validate(self, interaction: Interaction, user_id: str):
+        session = self.level_up_sessions.get(user_id)
+        if not session:
+            await self._send_interaction_message(interaction, "Aucune montée de niveau en cours. Lancez `/monter_niveau`.")
+            return
+
+        if session["selected_attribute"] is None:
+            await self.show_level_up_attribute_menu(interaction, user_id)
+            return
+
+        try:
+            self._apply_skill_distribution_values(
+                session["data"],
+                session["skill_values"],
+                session["required_skill_points"],
+            )
+        except ValueError as exc:
+            reason = exc.args[0]
+            if reason == "skill_points":
+                await self._send_interaction_message(
+                    interaction,
+                    f"Vous devez distribuer exactement {session['required_skill_points']} points dans les compétences.",
+                )
+                return
+            if isinstance(reason, str) and reason.startswith("skill_cap:"):
+                _, skill_name, category = reason.split(":")
+                await self._send_interaction_message(
+                    interaction,
+                    f"Le niveau de {skill_name} ne peut pas dépasser le niveau de {category[:3].upper()}.",
+                )
+                return
+            await self._send_interaction_message(interaction, "Valeurs de compétences invalides.")
+            return
+
+        player_data = session["data"]
+        player_data["level"] = session["target_level"]
+        for_attr = player_data["attributes"].get("for", 0)
+        int_attr = player_data["attributes"].get("int", 0)
+        pv_gain, pm_gain = compute_level_up_gain(player_data["level"], for_attr, int_attr)
+        player_data["pv_max"] += pv_gain
+        player_data["mana_max"] += pm_gain
+        player_data["pv_actu"] = player_data["pv_max"]
+        player_data["mana_actu"] = player_data["mana_max"]
+        try:
+            await asyncio.to_thread(update_player, user_id, player_data)
+        except DatabaseError:
+            await self._send_interaction_message(interaction, "Erreur lors de la sauvegarde du niveau gagné.")
+            return
+        self.level_up_sessions.pop(user_id, None)
+
+        await interaction.response.edit_message(
+            content=(
+                f"Le niveau de {player_data['name']} passe à {player_data['level']}.\n"
+                f"PV +{pv_gain}, PM +{pm_gain} | "
+                f"PV max: {player_data['pv_max']} | PM max: {player_data['mana_max']}"
+            ),
+            embed=None,
+            view=None,
+        )
+
+    async def handle_creation_magic_selection(self, interaction: Interaction, user_id: str, selected_magic: str, step: int):
+        session = self.creation_sessions.get(user_id)
+        if not session or session["step"] != step:
+            await self._send_interaction_message(interaction, "Session de création invalide. Relancez `/creer_personnage`.")
+            return
+
+        if selected_magic in session["data"]["magie"]:
+            await self._send_interaction_message(
+                interaction,
+                f"La magie {selected_magic} a déjà été choisie. Veuillez en choisir une autre.",
+            )
+            return
+
+        session["data"]["magie"].append(selected_magic)
         session["step"] += 1
-        await self.next_creation_step(reaction.message.channel, user_id)
+        await self._send_creation_step_prompt(interaction, user_id)
 
     @app_commands.command(name="creer", description="Crée un utilisateur joueur.")
     async def creer(self, interaction: Interaction):
@@ -204,8 +768,11 @@ class PlayerCommands(commands.Cog):
     @app_commands.command(name="creer_personnage", description="Crée un nouveau personnage.")
     async def creer_personnage(self, interaction: Interaction):
         user_id = str(interaction.user.id)
+        if user_id in self.creation_sessions:
+            await self._send_creation_step_prompt(interaction, user_id)
+            return
         self.creation_sessions[user_id] = {"step": 0, "data": new_character_template()}
-        await self.next_creation_step(interaction.channel, user_id)
+        await self._send_creation_step_prompt(interaction, user_id)
 
     async def choisir_personnage_autocomplete(self, interaction: Interaction, current: str):
         user_id = interaction.user.id
@@ -300,81 +867,21 @@ class PlayerCommands(commands.Cog):
             await interaction.response.send_message("Utilisateur non trouvé.")
             return
 
+        if user_id in self.level_up_sessions:
+            session = self.level_up_sessions[user_id]
+            if session["selected_attribute"] is None:
+                await self.show_level_up_attribute_menu(interaction, user_id)
+            else:
+                await self.show_level_up_skill_main_menu(interaction, user_id)
+            return
+
         player_data = await asyncio.to_thread(load_player, user_id)
         if not player_data:
             await interaction.response.send_message("Personnage non trouvé.")
             return
 
-        player_data["level"] += 1
-        niveau = player_data["level"]
-        await interaction.response.send_message(
-            f"Vous avez monté au niveau {niveau}. Distribuez 1 point d'attribut et {2 if player_data['race'] != 'Humain' else 3} points de compétence."
-        )
-
-        try:
-            await interaction.channel.send("Entrez l'attribut à augmenter (for, agi, cha, int) et la valeur à ajouter (1): exemple: int 1")
-            msg = await self.bot.wait_for(
-                "message",
-                timeout=self.LEVEL_UP_TIMEOUT_SECONDS,
-                check=lambda m: m.author == interaction.user and m.channel == interaction.channel,
-            )
-            attr, value = msg.content.split()
-            player_data["attributes"][attr] += int(value)
-
-            await interaction.channel.send(
-                f"Entrez les compétences à augmenter et les valeurs à ajouter ({2 if player_data['race'] != 'Humain' else 3} points) (par ex. pugilat 1, athletisme 1):"
-            )
-            msg = await self.bot.wait_for(
-                "message",
-                timeout=self.LEVEL_UP_TIMEOUT_SECONDS,
-                check=lambda m: m.author == interaction.user and m.channel == interaction.channel,
-            )
-            skills = msg.content.split(", ")
-            total_points = 0
-            for skill in skills:
-                skill_name, skill_value = skill.split()
-                skill_value = int(skill_value)
-                total_points += skill_value
-                for category in player_data["skills"]:
-                    if skill_name in player_data["skills"][category]:
-                        if skill_value > player_data["attributes"][category[:3]]:
-                            await interaction.channel.send(
-                                f"Le niveau de {skill_name} ne peut pas dépasser le niveau de {category[:3].upper()}."
-                            )
-                            return
-                        player_data["skills"][category][skill_name] += skill_value
-                        break
-                else:
-                    await interaction.channel.send(f"Compétence {skill_name} non reconnue.")
-                    return
-        except ValueError:
-            await interaction.channel.send("Veuillez entrer des points valides pour l'attribut et les compétences.")
-            return
-        except asyncio.TimeoutError:
-            await interaction.channel.send(
-                f"Temps écoulé ({self.LEVEL_UP_TIMEOUT_SECONDS}s). Recommencez la commande /monter_niveau."
-            )
-            return
-        except (KeyError, TypeError):
-            await interaction.channel.send("Format de données joueur invalide.")
-            return
-
-        required_points = 3 if player_data["race"] == "Humain" else 2
-        if total_points != required_points:
-            await interaction.channel.send(f"Vous devez distribuer exactement {required_points} points dans les compétences.")
-            return
-
-        for_attr = player_data["attributes"].get("for", 0)
-        int_attr = player_data["attributes"].get("int", 0)
-        pv_gain, pm_gain = compute_level_up_gain(niveau, for_attr, int_attr)
-        player_data["pv_max"] += pv_gain
-        player_data["mana_max"] += pm_gain
-        player_data["pv_actu"] = player_data["pv_max"]
-        player_data["mana_actu"] = player_data["mana_max"]
-        await asyncio.to_thread(update_player, user_id, player_data)
-        await interaction.channel.send(
-            f"Le niveau de {player_data['name']} a été augmenté avec succès à {niveau}. PV max: {player_data['pv_max']}, PM max: {player_data['mana_max']}."
-        )
+        self.level_up_sessions[user_id] = self._new_level_up_session(player_data)
+        await self.show_level_up_attribute_menu(interaction, user_id)
 
     @app_commands.command(name="info", description="Affiche les informations du personnage actif.")
     @app_commands.describe(joueur="Le joueur dont vous voulez voir les informations")
