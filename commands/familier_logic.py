@@ -4,6 +4,7 @@ from database import DEFAULT_INVENTORY
 
 
 def default_familier_skills():
+    """Retourne la grille de compétences initiale d'un familier."""
     return {
         "force": {
             "pugilat": 0,
@@ -41,6 +42,7 @@ def default_familier_skills():
 
 
 def find_familier(player_data, nom_familier, case_insensitive=True):
+    """Recherche un familier par nom dans le personnage actif."""
     if case_insensitive:
         normalized = nom_familier.lower()
         return next((f for f in player_data.get("familiers", []) if f["nom"].lower() == normalized), None)
@@ -48,6 +50,7 @@ def find_familier(player_data, nom_familier, case_insensitive=True):
 
 
 def build_familier_view_model(familier):
+    """Convertit un familier en modèle compatible avec les vues joueur."""
     inventory = familier.get("inventory")
     if not isinstance(inventory, dict):
         inventory = copy.deepcopy(DEFAULT_INVENTORY)

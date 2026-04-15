@@ -37,6 +37,17 @@ class CombatCommands(commands.Cog):
     async def _load_player_or_none(self, user_id):
         return await asyncio.to_thread(load_player, user_id)
 
+    async def _resolve_entity_for_autocomplete(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        player_data = await self._load_player_or_none(user_id)
+        if not player_data:
+            return None
+        familier_name = getattr(interaction.namespace, "familier", None)
+        if not familier_name:
+            return player_data
+        familier_data = find_familier(player_data, familier_name)
+        return familier_data or player_data
+
     @staticmethod
     def _entity_name(entity_data, is_familier: bool):
         return entity_data["nom"] if is_familier else entity_data["name"]
@@ -91,6 +102,37 @@ class CombatCommands(commands.Cog):
             return player_data, None, None, f"Familier {familier_name} non trouvé."
         return player_data, familier_data, True, None
 
+    @staticmethod
+    def _bounded_delta(current_value: int, delta: int, min_value: int = 0, max_value: int | None = None):
+        next_value = current_value + delta
+        if max_value is not None:
+            next_value = min(next_value, max_value)
+        return max(next_value, min_value)
+
+    async def _apply_pv_delta(self, owner_user_id: str, player_data, entity_data, is_familier: bool, delta: int):
+        current_pv = self._get_pv(entity_data, is_familier)
+        updated_pv = self._bounded_delta(
+            current_pv,
+            delta,
+            min_value=0,
+            max_value=self._get_pv_max(entity_data, is_familier) if delta > 0 else None,
+        )
+        self._set_pv(entity_data, is_familier, updated_pv)
+        await asyncio.to_thread(update_player, owner_user_id, player_data)
+        return updated_pv
+
+    async def _apply_mana_delta(self, owner_user_id: str, player_data, entity_data, is_familier: bool, delta: int):
+        current_mana = self._get_mana(entity_data, is_familier)
+        updated_mana = self._bounded_delta(
+            current_mana,
+            delta,
+            min_value=0,
+            max_value=self._get_mana_max(entity_data, is_familier) if delta > 0 else None,
+        )
+        self._set_mana(entity_data, is_familier, updated_mana)
+        await asyncio.to_thread(update_player, owner_user_id, player_data)
+        return updated_mana
+
     async def blague_privee(self, interaction: discord.Interaction):
         if _blague_privee is None:
             return
@@ -101,18 +143,12 @@ class CombatCommands(commands.Cog):
             return
 
     async def weapon_autocomplete(self, interaction: discord.Interaction, current: str):
-        user_id = str(interaction.user.id)
-        player_data = await self._load_player_or_none(user_id)
-        if not player_data:
+        entity_data = await self._resolve_entity_for_autocomplete(interaction)
+        if not entity_data:
             return []
-        familier_name = getattr(interaction.namespace, "familier", None)
-        if familier_name:
-            familier_data = find_familier(player_data, familier_name)
-            if familier_data:
-                player_data = familier_data
         return [
             app_commands.Choice(name=choice, value=choice)
-            for choice in get_weapon_choices(player_data)
+            for choice in get_weapon_choices(entity_data)
             if current.lower() in choice.lower()
         ]
 
@@ -198,19 +234,13 @@ class CombatCommands(commands.Cog):
         await interaction.followup.send("\n".join(response_lines))
 
     async def skill_autocomplete(self, interaction: discord.Interaction, current: str):
-        user_id = str(interaction.user.id)
-        player_data = await self._load_player_or_none(user_id)
-        if not player_data:
+        entity_data = await self._resolve_entity_for_autocomplete(interaction)
+        if not entity_data:
             return [app_commands.Choice(name="perception", value="perception")]
-        familier_name = getattr(interaction.namespace, "familier", None)
-        if familier_name:
-            familier_data = find_familier(player_data, familier_name)
-            if familier_data:
-                player_data = familier_data
 
         choices = [
             app_commands.Choice(name=choice, value=choice)
-            for choice in get_skill_choices(player_data)
+            for choice in get_skill_choices(entity_data)
             if current.lower() in choice.lower()
         ]
         choices.append(app_commands.Choice(name="perception", value="perception"))
@@ -332,15 +362,11 @@ class CombatCommands(commands.Cog):
         response_lines = build_magic_response(entity_data, magie_type, scaling, effect_levels)
 
         self._set_mana(entity_data, is_familier, entity_mana - mana_cost)
-        deplete_message = ""
-        if self._get_mana(entity_data, is_familier) < 0:
-            deplete_message = " Vous tombez en déplétion de mana."
-            self._set_mana(entity_data, is_familier, 0)
         await asyncio.to_thread(update_player, user_id, player_data)
 
         response_lines.append(f"Jet de magie: {base_roll} + {bonus} = {total_roll}")
         response_lines.append(
-            f"Coût de mana: {mana_cost}. Mana restant ({self._entity_name(entity_data, is_familier)}): {self._get_mana(entity_data, is_familier)}.{deplete_message}"
+            f"Coût de mana: {mana_cost}. Mana restant ({self._entity_name(entity_data, is_familier)}): {self._get_mana(entity_data, is_familier)}."
         )
         await interaction.response.send_message("\n".join(response_lines))
 
@@ -357,9 +383,7 @@ class CombatCommands(commands.Cog):
         degats, _ = parse_dice_expression(expression)
         if armure:
             degats = (degats + 1) // 2
-        updated_pv = max(self._get_pv(entity_data, is_familier) - degats, 0)
-        self._set_pv(entity_data, is_familier, updated_pv)
-        await asyncio.to_thread(update_player, player_id, player_data)
+        await self._apply_pv_delta(player_id, player_data, entity_data, is_familier, -degats)
         await interaction.response.send_message(
             f"{self._entity_name(entity_data, is_familier)} ({joueur.mention}) a subi {degats} dégâts. PV actuels: {self._get_pv(entity_data, is_familier)}"
         )
@@ -376,9 +400,7 @@ class CombatCommands(commands.Cog):
             return
 
         soins, _ = parse_dice_expression(expression)
-        updated_pv = min(self._get_pv(entity_data, is_familier) + soins, self._get_pv_max(entity_data, is_familier))
-        self._set_pv(entity_data, is_familier, updated_pv)
-        await asyncio.to_thread(update_player, player_id, player_data)
+        await self._apply_pv_delta(player_id, player_data, entity_data, is_familier, soins)
         await interaction.response.send_message(
             f"{self._entity_name(entity_data, is_familier)} ({target.mention}) a été soigné de {soins} PV. PV actuels: {self._get_pv(entity_data, is_familier)}"
         )
@@ -395,9 +417,7 @@ class CombatCommands(commands.Cog):
             return
 
         degats, _ = parse_dice_expression(expression)
-        updated_mana = max(self._get_mana(entity_data, is_familier) - degats, 0)
-        self._set_mana(entity_data, is_familier, updated_mana)
-        await asyncio.to_thread(update_player, player_id, player_data)
+        await self._apply_mana_delta(player_id, player_data, entity_data, is_familier, -degats)
         await interaction.response.send_message(
             f"{self._entity_name(entity_data, is_familier)} ({target.mention}) a perdu {degats} de mana. Mana actuels: {self._get_mana(entity_data, is_familier)}"
         )
@@ -414,9 +434,7 @@ class CombatCommands(commands.Cog):
             return
 
         soins, _ = parse_dice_expression(expression)
-        updated_mana = min(self._get_mana(entity_data, is_familier) + soins, self._get_mana_max(entity_data, is_familier))
-        self._set_mana(entity_data, is_familier, updated_mana)
-        await asyncio.to_thread(update_player, player_id, player_data)
+        await self._apply_mana_delta(player_id, player_data, entity_data, is_familier, soins)
         await interaction.response.send_message(
             f"{self._entity_name(entity_data, is_familier)} ({target.mention}) a récupéré {soins} de mana. Mana actuels: {self._get_mana(entity_data, is_familier)}"
         )

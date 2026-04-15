@@ -7,6 +7,7 @@ from discord.ext import commands
 
 from commands.familier_logic import default_familier_skills
 from commands.player_views import CreationOwnerView, OpenModalView, SkillCategoryView, SkillDistributionView
+from commands.skill_ui import build_skill_table_text, count_allocated_skill_points
 from config import ADMIN_IDS
 from database import (
     DEFAULT_INVENTORY,
@@ -164,66 +165,20 @@ class FamilierCommands(commands.Cog):
             },
         }
 
-    @staticmethod
-    def _display_skill_name(skill_name: str) -> str:
-        return skill_name.replace("_", " ")
-
-    @staticmethod
-    def _count_allocated_skill_points(values: dict[str, dict[str, int]]) -> int:
-        return sum(skill_value for category_values in values.values() for skill_value in category_values.values())
-
-    def _build_skill_table_text(self, familier_data, allocated_values: dict[str, dict[str, int]]) -> str:
-        attributes = familier_data["attributes"]
-        category_pairs = [("force", "agilite"), ("charisme", "intelligence")]
-        lines = []
-
-        for pair_index, (left_category, right_category) in enumerate(category_pairs):
-            left_header = f"{self.SKILL_CATEGORY_LABELS[left_category]} ({attributes[left_category[:3]]})"
-            right_header = f"{self.SKILL_CATEGORY_LABELS[right_category]} ({attributes[right_category[:3]]})"
-
-            left_rows = []
-            for skill_name in familier_data["skills"][left_category]:
-                current_level = familier_data["skills"][left_category][skill_name]
-                allocated_level = allocated_values[left_category][skill_name]
-                left_rows.append(f"{self._display_skill_name(skill_name)}: {current_level + allocated_level}")
-
-            right_rows = []
-            for skill_name in familier_data["skills"][right_category]:
-                current_level = familier_data["skills"][right_category][skill_name]
-                allocated_level = allocated_values[right_category][skill_name]
-                right_rows.append(f"{self._display_skill_name(skill_name)}: {current_level + allocated_level}")
-
-            left_width = max(len(left_header), *(len(row) for row in left_rows))
-            right_width = max(len(right_header), *(len(row) for row in right_rows))
-
-            lines.append(f"{left_header.ljust(left_width)} | {right_header.ljust(right_width)}")
-            lines.append(f"{'_' * left_width} | {'_' * right_width}")
-
-            row_count = max(len(left_rows), len(right_rows))
-            for row_index in range(row_count):
-                left_cell = left_rows[row_index] if row_index < len(left_rows) else ""
-                right_cell = right_rows[row_index] if row_index < len(right_rows) else ""
-                lines.append(f"{left_cell.ljust(left_width)} | {right_cell.ljust(right_width)}")
-
-            if pair_index == 0:
-                lines.append("")
-
-        return "```text\n" + "\n".join(lines) + "\n```"
-
     def _build_skill_embed(
         self,
         familier_data,
         allocated_values: dict[str, dict[str, int]],
         selected_category: str | None = None,
     ):
-        allocated_points = self._count_allocated_skill_points(allocated_values)
+        allocated_points = count_allocated_skill_points(allocated_values)
 
         title = "Création du familier - Compétences"
         if selected_category:
             title += f" ({self.SKILL_CATEGORY_LABELS.get(selected_category, selected_category.upper())})"
 
         embed = discord.Embed(title=title, color=discord.Color.blurple())
-        embed.description = self._build_skill_table_text(familier_data, allocated_values)
+        embed.description = build_skill_table_text(familier_data, allocated_values, self.SKILL_CATEGORY_LABELS)
         embed.add_field(name="Points alloués", value=f"{allocated_points} (répartition libre)", inline=False)
         embed.add_field(name="Règles", value="Aucune limitation automatique.", inline=False)
         return embed
